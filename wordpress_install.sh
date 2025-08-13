@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # SelfhostedWP Automated Installer & Backup for Ubuntu
-# - Installs per-site WordPress in /var/www/<site>
-# - Sets up Apache, MariaDB, PHP, SSL, Postfix SMTP relay (noninteractive)
-# - Tracks all sites in /etc/selfhostedwp/sites.list
-# - Schedules daily backup to Azure Blob Storage, one archive per site
+# Improved: Per-site SSL certs included in site backup archives, global configs also backed up
 
 set -Eeuo pipefail
 
@@ -404,13 +401,13 @@ systemctl restart apache2
 
 # ---------- update sites.list ----------
 if ! grep -q "^$SITE_HOST|" "$SITES_LIST"; then
-  echo "$SITE_HOST|$DB_NAME|$DB_USER|$WEBROOT|$VHOST_FILE" >> "$SITES_LIST"
+  echo "$SITE_HOST|$DB_NAME|$DB_USER|$WEBROOT|$VHOST_FILE|$SSL_OPTION" >> "$SITES_LIST"
   info "Site $SITE_HOST added to $SITES_LIST"
 else
   info "Site $SITE_HOST already exists in $SITES_LIST"
 fi
 
-# --------- Backup Script and Mail Setup ---------
+# --------- Install/Update Backup Script ---------
 BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
 BACKUP_CONF_PATH="/etc/selfhostedwp_backup.conf"
 
@@ -437,7 +434,7 @@ REPORT_TO="$REPORT_TO"
 SITES_LIST="$SITES_LIST"
 EOF
 
-  # Install embedded backup script (multi-site, per-site archives)
+  # Install embedded backup script
   cat > "$BACKUP_SCRIPT_PATH" <<'EOS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -452,17 +449,55 @@ Today="$(date +%A)"
 Temp_Backup="/tmp/selfhostedwp_backup_$Today"
 mkdir -p "$Temp_Backup"
 
-while IFS='|' read -r SITE_HOST DB_NAME DB_USER WEBROOT VHOST_FILE; do
+while IFS='|' read -r SITE_HOST DB_NAME DB_USER WEBROOT VHOST_FILE SSL_OPTION; do
   # Archive site files
   tar -czf "$Temp_Backup/${SITE_HOST}.tar.gz" -C "$WEBROOT" .
+
   # DB dump
   mysqldump "$DB_NAME" > "$Temp_Backup/db_${DB_NAME}.sql"
+
   # vhost conf
   cp "$VHOST_FILE" "$Temp_Backup/${SITE_HOST}.conf"
+
+  # --- SITE CERTS ---
+  # Let's Encrypt
+  if [[ "$SSL_OPTION" == "1" && -d "/etc/letsencrypt/live/$SITE_HOST" ]]; then
+    tar -czf "$Temp_Backup/${SITE_HOST}_le_certs.tar.gz" -C "/etc/letsencrypt/live/$SITE_HOST" .
+  fi
+  # Custom/self-signed
+  if [[ "$SSL_OPTION" == "2" || "$SSL_OPTION" == "3" ]]; then
+    # Find typical cert/key paths
+    if [[ -f "/var/cert/$SITE_HOST.crt" ]]; then
+      cp "/var/cert/$SITE_HOST.crt" "$Temp_Backup/${SITE_HOST}.crt"
+    fi
+    if [[ -f "/var/cert/$SITE_HOST.key" ]]; then
+      cp "/var/cert/$SITE_HOST.key" "$Temp_Backup/${SITE_HOST}.key"
+    fi
+    if [[ -d "/var/cert/selfsigned/" ]]; then
+      # If using selfsigned, back up any matching files
+      if [[ -f "/var/cert/selfsigned/$SITE_HOST.crt" ]]; then
+        cp "/var/cert/selfsigned/$SITE_HOST.crt" "$Temp_Backup/${SITE_HOST}_selfsigned.crt"
+      fi
+      if [[ -f "/var/cert/selfsigned/$SITE_HOST.key" ]]; then
+        cp "/var/cert/selfsigned/$SITE_HOST.key" "$Temp_Backup/${SITE_HOST}_selfsigned.key"
+      fi
+    fi
+  fi
 done < "$SITES_LIST"
 
-# Copy sites.list for restore
 cp "$SITES_LIST" "$Temp_Backup/sites.list"
+
+# --- GLOBAL CONFIG FILES ---
+cp /etc/postfix/main.cf "$Temp_Backup/server_main.cf"
+cp /etc/postfix/sasl_passwd "$Temp_Backup/server_sasl_passwd"
+cp /etc/selfhostedwp_backup.conf "$Temp_Backup/server_selfhostedwp_backup.conf"
+cp /etc/apache2/apache2.conf "$Temp_Backup/server_apache2.conf"
+if [[ -d /var/cert/ ]]; then
+  tar -czf "$Temp_Backup/server_cert.tar.gz" -C /var cert
+fi
+if [[ -d /etc/letsencrypt/ ]]; then
+  tar -czf "$Temp_Backup/server_letsencrypt.tar.gz" -C /etc letsencrypt
+fi
 
 if command -v az >/dev/null 2>&1; then
   Azure_Blob_Url="$BACKUP_TARGET"
