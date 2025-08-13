@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SelfhostedWP Automated Installer & Backup for Ubuntu
 # - Installs per-site WordPress in /var/www/<site>
-# - Sets up Apache, MariaDB, PHP, SSL, Postfix SMTP relay
+# - Sets up Apache, MariaDB, PHP, SSL, Postfix SMTP relay (noninteractive)
 # - Backs up ALL sites in /var/www and ALL vhost configs
 # - Schedules daily backup to Azure Blob Storage with email notifications
 
@@ -103,8 +103,7 @@ while :; do
   if is_valid_hostname "$SITE_HOST"; then break; else warn "Invalid hostname, try again."; fi
 done
 
-EMAIL_DOMAIN="${SITE_HOST#*.}"
-[[ "$EMAIL_DOMAIN" == "$SITE_HOST" ]] && EMAIL_DOMAIN="$SITE_HOST"
+EMAIL_DOMAIN="${SITE_HOST#www.}"
 ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
 
 WEBROOT="/var/www/${SITE_HOST}" # Per-site WordPress install target
@@ -142,6 +141,7 @@ fi
 
 # ---------- Packages ----------
 info "Updating package list and installing required packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y apache2 php libsasl2-modules libapache2-mod-php php-gd mariadb-server mariadb-client php-mysql mailutils php-gmp php-mbstring php-xml php-curl wget rsync unzip tar openssl curl
 
@@ -438,6 +438,8 @@ SMTP_PORT=${SMTP_PORT:-587}
 read -p "Enter the SMTP username: " SMTP_USER
 ask_hidden "Enter the SMTP password: " "" SMTP_PASS
 
+MAIL_DOMAIN="${SITE_HOST#www.}"
+
 cat > "$BACKUP_CONF_PATH" <<EOF
 BACKUP_TARGET="$BACKUP_TARGET"
 REPORT_FROM="$REPORT_FROM"
@@ -505,7 +507,8 @@ info "Daily backup scheduled at $BACKUP_TIME"
 info "Backup configuration written to $BACKUP_CONF_PATH"
 
 info "Configuring Postfix for SMTP relay..."
-debconf-set-selections <<< "postfix postfix/mailname string $(hostname -f)"
+export DEBIAN_FRONTEND=noninteractive
+debconf-set-selections <<< "postfix postfix/mailname string $MAIL_DOMAIN"
 debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
 apt-get install -y postfix mailutils
 
