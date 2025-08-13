@@ -1,0 +1,38 @@
+/*
+Theme Name: SelfhostedWP Custom Theme
+Theme URI: https://github.com/andrew-kemp/SelfhostedWP
+Author: Andrew Kemp
+Description: Minimal theme with header, main, footer, menu, and social icons.
+Version: 1.0
+*/
+
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f9f9f9;
+}
+header, footer {
+    background: #222;
+    color: #fff;
+    padding: 1.5em 0;
+}
+nav {
+    margin: 0 auto;
+    display: flex;
+    justify-content: center;
+    gap: 2em;
+}
+.social-icons {
+    display: flex;
+    gap: 1em;
+    margin-left: 2em;
+}
+main {
+    min-height: 60vh;
+    padding: 2em 0;
+    background: #fff;
+}
+footer {
+    text-align: center;
+    font-size: 0.9em;
+}
