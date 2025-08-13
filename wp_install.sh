@@ -89,6 +89,18 @@ install_azure_cli() {
   fi
 }
 
+# Extract root domain (handles .co.uk, .org.uk, etc.)
+get_root_domain() {
+  local host="$1"
+  local two_part_tlds="co.uk|org.uk|ac.uk|gov.uk|sch.uk|me.uk|net.uk|plc.uk|ltd.uk"
+  if [[ "$host" =~ ([^.]+)\.([^.]+\.(co\.uk|org\.uk|ac\.uk|gov\.uk|sch\.uk|me\.uk|net\.uk|plc\.uk|ltd\.uk))$ ]]; then
+    echo "${BASH_REMATCH[2]}"
+  else
+    # Otherwise, just take everything after the first dot
+    echo "${host#*.}"
+  fi
+}
+
 require_root
 detect_ubuntu
 
@@ -103,7 +115,7 @@ while :; do
   if is_valid_hostname "$SITE_HOST"; then break; else warn "Invalid hostname, try again."; fi
 done
 
-EMAIL_DOMAIN="${SITE_HOST#www.}"
+EMAIL_DOMAIN="$(get_root_domain "$SITE_HOST")"
 ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
 
 WEBROOT="/var/www/${SITE_HOST}" # Per-site WordPress install target
@@ -438,7 +450,7 @@ SMTP_PORT=${SMTP_PORT:-587}
 read -p "Enter the SMTP username: " SMTP_USER
 ask_hidden "Enter the SMTP password: " "" SMTP_PASS
 
-MAIL_DOMAIN="${SITE_HOST#www.}"
+MAIL_DOMAIN="$EMAIL_DOMAIN"
 
 cat > "$BACKUP_CONF_PATH" <<EOF
 BACKUP_TARGET="$BACKUP_TARGET"
