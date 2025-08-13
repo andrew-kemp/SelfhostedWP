@@ -402,6 +402,12 @@ echo "-------------------------------------------"
 cat /etc/apache2/sites-available/${SITE_HOST}.conf
 echo "-------------------------------------------"
 
+info "Setting ownership for /var/www to www-data..."
+chown -R www-data:www-data /var/www
+
+info "Restarting Apache to ensure permissions are effective..."
+systemctl restart apache2
+
 # --------- Backup Script and Mail Setup ---------
 BACKUP_SCRIPT_URL="https://raw.githubusercontent.com/andrew-kemp/SelfhostedWP/main/backup.sh"
 BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
@@ -471,3 +477,28 @@ if [[ "${RUN_TEST_BACKUP,,}" == "y" ]]; then
   /usr/local/bin/backup.sh
   info "Test backup completed. Please check your backup destination and notification email."
 fi
+
+INSTALL_REPORT="/tmp/install_report_$(date +%Y%m%d_%H%M%S).txt"
+cat > "$INSTALL_REPORT" <<EOF
+SelfhostedWP Install Report - $(date)
+
+Site: https://${SITE_HOST}
+DocumentRoot: ${WEBROOT}
+
+Database name: ${DB_NAME}
+Database user: ${DB_USER}
+Database password: ${AUTOGEN_DB_PASS:+(auto-generated, see wp-config.php)${AUTOGEN_DB_PASS:-(hidden)}}
+
+SSL: ${SSL_OPTION}
+Backup location: ${BACKUP_TARGET}
+Backup time (daily): ${BACKUP_TIME}
+
+SMTP server: ${SMTP_SERVER}:${SMTP_PORT}
+Report emails: From ${REPORT_FROM} -> To ${REPORT_TO}
+
+Server hostname: $(hostname -f)
+EOF
+
+mail -s "SelfhostedWP install report: ${SITE_HOST}" -r "$REPORT_FROM" "$REPORT_TO" < "$INSTALL_REPORT"
+info "Install report emailed to $REPORT_TO from $REPORT_FROM"
+rm -f "$INSTALL_REPORT"
