@@ -463,3 +463,11 @@ systemctl restart postfix
 info "Postfix SMTP relay configured."
 echo "SelfhostedWP backup install completed." | mail -s "Backup install test" -r "$REPORT_FROM" "$REPORT_TO"
 info "Test email sent to $REPORT_TO from $REPORT_FROM"
+
+echo
+read -p "Would you like to run a test backup now to verify everything is working? (y/n): " RUN_TEST_BACKUP
+if [[ "${RUN_TEST_BACKUP,,}" == "y" ]]; then
+  info "Running test backup..."
+  /usr/local/bin/backup.sh
+  info "Test backup completed. Please check your backup destination and notification email."
+fi
