@@ -1,94 +1,157 @@
-# SelfHostedWP
+# SelfhostedWP Automated WordPress Installer & Backup
 
-A simple, interactive Bash script to set up a secure WordPress + LAMP stack on Ubuntu.  
-Supports Let's Encrypt, custom, or self-signed SSL.  
-Prompts for all key values (hostname, webroot, DB, etc) and generates a minimal production-ready Apache vhost.
+This script automates the setup of a secure, multi-site WordPress hosting environment on Ubuntu, complete with daily backups to Azure Blob Storage and SMTP email notifications.  
+It supports per-site installations in `/var/www/<site>`, robust SSL options, Apache virtual host configuration, MariaDB setup, and Postfix SMTP relay.
 
 ---
 
 ## Features
 
-- Installs Apache, PHP, MariaDB, and WordPress
-- Prompts for all configuration (hostname, DB, SSL, etc)
-- Lets you choose SSL: Let's Encrypt, custom cert, or self-signed
-- Minimal, secure Apache vhost (separate logs, security headers, HTTP→HTTPS)
-- Sets file permissions
-- Works for dev, staging, or production
+- **Multi-site WordPress:** Each site is installed in its own directory under `/var/www/<site-hostname>`.
+- **Apache Virtual Hosts:** Automated creation of per-site SSL-enabled vhost configs.
+- **MariaDB Database:** Secure database and user creation per site.
+- **SSL Support:** Choose between Let's Encrypt (auto-renew), custom certs, or self-signed certificates.
+- **SMTP Email (Postfix):** Non-interactive setup for SMTP relay (e.g., SMTP2GO), with sensible defaults for `mailname` (extracts root domain, e.g., `andykemp.com` from `dev.andykemp.com`).
+- **Automated Backups:** Daily backup of `/var/www` (all sites), Apache vhost configs, SSL certs, and all MariaDB databases to Azure Blob Storage.
+- **Email Reports:** Backup success/failure notifications sent via configured SMTP relay.
+- **Unattended Install:** No interactive prompts during package installs.
 
 ---
 
-## Quick Start
+## How Domain Extraction Works
 
-### 1. Download and run the script
+When you enter a hostname (e.g., `dev3.kemponline.co.uk`, `blog.domain.com`, `mydomain.andykemp.cloud`), the script extracts the **root domain** for use in email addresses and the Postfix `mailname`.  
+This means:
 
-**IMPORTANT:** Run as root (use `sudo`) on Ubuntu!
+| Entered Hostname           | Extracted Domain for Email/Postfix |
+|----------------------------|------------------------------------|
+| www.kemponline.co.uk       | kemponline.co.uk                   |
+| dev3.kemponline.co.uk      | kemponline.co.uk                   |
+| blog.andykemp.com          | andykemp.com                       |
+| mydomain.andykemp.cloud    | andykemp.cloud                     |
+| www.domain.org.uk          | domain.org.uk                      |
+| dev.domain.com             | domain.com                         |
+
+If your domain uses a multi-part TLD (e.g., `.co.uk`, `.org.uk`), it is preserved.
+
+---
+
+## Installation Steps
+
+1. **Run the script as root (or with sudo):**
+    ```bash
+    sudo bash wp_install.sh
+    ```
+
+2. **Follow the prompts:**
+    - **Site Hostname:** Enter the desired FQDN (e.g., `www.mysite.com`, `dev.mysite.com`, etc.).
+    - **ServerAdmin Email:** Defaults to `admin@<root-domain>`.
+    - **MariaDB Details:** Database name, user, and (optional) password.
+    - **SSL Choice:** Pick Let's Encrypt, custom certs, or self-signed.
+    - **Backup & SMTP Details:** Provide your Azure Blob SAS URL and SMTP relay credentials.
+
+3. **Script completes:**
+    - Site installed in `/var/www/<site-hostname>`.
+    - Apache vhost configured.
+    - SSL issued and auto-renew (if Let's Encrypt).
+    - MariaDB database and user created.
+    - Postfix SMTP relay set up (with correct mailname).
+    - Daily backup scheduled via cron.
+    - Backup notification and install report sent via email.
+
+---
+
+## What Gets Backed Up?
+
+- All site files under `/var/www`
+- All Apache vhost configs (`/etc/apache2/sites-available`)
+- All SSL certificates (`/var/cert`)
+- All MariaDB databases
+- Key Postfix config files (`/etc/postfix/main.cf`, `/etc/postfix/sasl_passwd`)
+
+Backups are uploaded daily to your specified Azure Blob Storage SAS URL.
+
+---
+
+## SMTP/Email Setup
+
+- The script configures Postfix for SMTP relay using your provided server, port, username, and password.
+- The **mailname** used by Postfix is the extracted root domain from your site host (e.g., `andykemp.com` from `dev.andykemp.com`).
+- All backup/report emails are sent through this relay.
+
+---
+
+## Example
+
+Suppose you set up a site with hostname `dev3.kemponline.co.uk`:
+
+- **Site files:** `/var/www/dev3.kemponline.co.uk`
+- **Apache vhost:** `/etc/apache2/sites-available/dev3.kemponline.co.uk.conf`
+- **MariaDB database:** e.g., `db_dev3_kemponline_co_uk`
+- **ServerAdmin email:** `admin@kemponline.co.uk`
+- **Postfix mailname:** `kemponline.co.uk`
+- **Backups:** All sites in `/var/www`, all vhosts, all SSL certs, all databases
+
+---
+
+## Advanced Domain Extraction
+
+To ensure your email and mailname are always correct, the script strips any subdomain (like `www.`, `dev.`, `blog.`, etc.) and preserves multi-part TLDs:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrew-kemp/SelfHostedWP/main/install_wp.sh -o install_wp.sh
-sudo bash install_wp.sh
+get_root_domain() {
+  local host="$1"
+  local two_part_tlds="co.uk|org.uk|ac.uk|gov.uk|sch.uk|me.uk|net.uk|plc.uk|ltd.uk"
+  if [[ "$host" =~ ([^.]+)\.([^.]+\.(co\.uk|org\.uk|ac\.uk|gov\.uk|sch\.uk|me\.uk|net\.uk|plc\.uk|ltd\.uk))$ ]]; then
+    echo "${BASH_REMATCH[2]}"
+  else
+    echo "${host#*.}"
+  fi
+}
 ```
 
-### 2. Follow the prompts
+---
 
-- Enter your domain name, email, webroot, DB info, and choose SSL option.
-- The script will set up everything and print out your credentials and vhost config at the end.
+## Security Notes
+
+- Database passwords are stored in `wp-config.php` (not echoed unless you opt in).
+- SSL is enforced via Apache; automated renewal is enabled for Let's Encrypt.
+- Backups are encrypted in transit via Azure CLI.
 
 ---
 
 ## Requirements
 
-- Ubuntu (tested 20.04/22.04)
-- Root/sudo access
-- Fresh server recommended (but script is idempotent for most steps)
+- Ubuntu (recommended: 22.04 LTS or newer)
+- Azure CLI (installed automatically if missing)
+- Internet connectivity
+- Valid SMTP relay credentials for email reports
 
 ---
 
-## What it does
+## Uninstallation / Cleanup
 
-- Installs Apache, PHP, MariaDB, and WordPress
-- Creates a new database and user
-- Downloads the latest WordPress and prepares `wp-config.php`
-- Sets up a secure Apache vhost (with HTTPS redirect and security headers)
-- Installs and configures SSL (Let's Encrypt, custom, or self-signed)
-- Adjusts permissions for security
-
----
-
-## Example output
-
-After running, you'll see:
-
-- Site URL
-- DocumentRoot
-- Apache vhost file path and contents
-- Database credentials
-- SSL status and info
-
----
-
-## Updating or re-running
-
-You can re-run the script safely if you want to reset or update settings.  
-Be careful: the script may overwrite existing vhost and WordPress config if you use the same hostname/webroot.
+- Remove sites from `/var/www`
+- Remove vhost configs from `/etc/apache2/sites-available`
+- Remove databases/users from MariaDB
+- Remove backup cron job (`crontab -e`)
 
 ---
 
 ## Troubleshooting
 
-- If you get stuck or see an error, check the logs shown at the end of the run.
-- Restart Apache if you make manual changes:  
-  `sudo systemctl restart apache2`
-- For DNS/SSL issues, make sure your domain resolves to the server IP.
+- Check `/var/log/apache2` for Apache errors.
+- Check `/var/log/mail.log` for Postfix/email issues.
+- Backups are stored temporarily in `/tmp/temp_backup_<Day>` before upload.
 
 ---
 
 ## License
 
-MIT License.  
-See [LICENSE](LICENSE).
+MIT License
 
 ---
 
-## Author
+## Credits
 
-[andrew-kemp](https://github.com/andrew-kemp)
+Script and README generated by GitHub Copilot and [andrew-kemp](https://github.com/andrew-kemp).
