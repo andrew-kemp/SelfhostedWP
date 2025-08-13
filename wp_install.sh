@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LAMP + WordPress installer for Ubuntu
-# Includes backup script (embedded), scheduling, SMTP notification, install report, and Azure Blob backup
+# Includes embedded backup script, scheduling, SMTP notification, install report, and Azure Blob backup
 
 set -Eeuo pipefail
 
@@ -429,20 +429,12 @@ CRON_HOUR=$(echo "$BACKUP_TIME" | cut -d: -f1)
 CRON_MIN=$(echo "$BACKUP_TIME" | cut -d: -f2)
 read -p "Enter the sender email address for backup reports: " REPORT_FROM
 read -p "Enter the recipient email address for backup reports: " REPORT_TO
-read -p "Enter the SMTP server (e.g. mail.smtp2go.com): " SMTP_SERVER
-read -p "Enter the SMTP port (default 587): " SMTP_PORT
-SMTP_PORT=${SMTP_PORT:-587}
-read -p "Enter the SMTP username: " SMTP_USER
-ask_hidden "Enter the SMTP password: " "" SMTP_PASS
 
+# Only include fields needed for backup script!
 cat > "$BACKUP_CONF_PATH" <<EOF
 BACKUP_TARGET="$BACKUP_TARGET"
 REPORT_FROM="$REPORT_FROM"
 REPORT_TO="$REPORT_TO"
-SMTP_SERVER="$SMTP_SERVER"
-SMTP_PORT="$SMTP_PORT"
-SMTP_USER="$SMTP_USER"
-SMTP_PASS="$SMTP_PASS"
 WEBROOT="$WEBROOT"
 VHOST_FILE="$VHOST_FILE"
 EOF
@@ -510,19 +502,8 @@ debconf-set-selections <<< "postfix postfix/mailname string $(hostname -f)"
 debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
 apt-get install -y postfix mailutils
 
-postconf -e "relayhost = [$SMTP_SERVER]:$SMTP_PORT"
-postconf -e "smtp_sasl_auth_enable = yes"
-postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
-postconf -e "smtp_sasl_security_options = noanonymous"
-postconf -e "smtp_tls_security_level = may"
-postconf -e "smtp_use_tls = yes"
-postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
 postconf -e "myhostname = $(hostname -f)"
 postconf -e "myorigin = /etc/mailname"
-
-echo "[$SMTP_SERVER]:$SMTP_PORT $SMTP_USER:$SMTP_PASS" > /etc/postfix/sasl_passwd
-postmap /etc/postfix/sasl_passwd
-chmod 600 /etc/postfix/sasl_passwd
 
 systemctl restart postfix
 
@@ -545,7 +526,6 @@ SSL: ${SSL_OPTION}
 Backup location: ${BACKUP_TARGET}
 Backup time (daily): ${BACKUP_TIME}
 
-SMTP server: ${SMTP_SERVER}:${SMTP_PORT}
 Report emails: From ${REPORT_FROM} -> To ${REPORT_TO}
 
 Server hostname: $(hostname -f)
