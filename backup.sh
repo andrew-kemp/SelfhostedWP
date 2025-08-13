@@ -1,41 +1,93 @@
-# Backup Webiste, Database and config
-# Created by Andrew Kemp
-# 11th May 2023
-# Version 1.0
+#!/usr/bin/env bash
+# Automated web server backup & notification script
+# Reads config from /etc/selfhostedwp_backup.conf
 
-# Variables
-Azure_Blob="https://andrewkemp.blob.core.windows.net/webhost?sp=rcwd&st=2024-05-20T09:55:18Z&se=2025-05-19T17:55:18Z&spr=https&sv=2022-11-02&sr=c&sig=gnBwtReondsXLGyx2EXAZpldNic%2FG%2BTY0kJTuV07OJc%3D"
+set -euo pipefail
+
+# Load config
+CONFIG_PATH="/etc/selfhostedwp_backup.conf"
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  echo "Backup config file $CONFIG_PATH not found!"
+  exit 1
+fi
+source "$CONFIG_PATH"
+
+# Backup variables
 Today=$(date +%A)
+Temp_Backup="/temp_backup"
+Backup_Archive="${Temp_Backup}/${Today}/backup.tar.gz"
+Website_Path="/var/www/"
 Web_Config="/etc/apache2/sites-available/"
-# DB_Name="db_andykemp"
 Postfix_Config="/etc/postfix/main.cf"
 SASL_Passwd="/etc/postfix/sasl_passwd"
-Temp_Backup="/temp_backup"
-Website_Path="/var/www/"
 Cert_Directory="/var/cert"
 
+# Prepare temp folder
+rm -rf "$Temp_Backup"
+mkdir -p "${Temp_Backup}/${Today}"
 
-# Creat the temp backup folder
-mkdir $Temp_Backup
-mkdir $Temp_Backup"/"$Today
-# Create Archive with Website data and config files
-tar -cpvzf $Temp_Backup"/"$Today"/"backup".tar.gz" $Website_Path $Web_Config $Postfix_Config $SASL_Passwd $Cert_Directory
+# Create archive: site files + configs + certs
+tar -cpvzf "$Backup_Archive" \
+  "$Website_Path" \
+  "$Web_Config" \
+  "$Postfix_Config" \
+  "$SASL_Passwd" \
+  "$Cert_Directory"
 
-# Backup the Database
-# mysqldump $DB_Name > $Temp_Backup"/"$DB_Name"-"$Today".sql"
-
-for DB in $(mysql -e 'show databases' -s --skip-column-names); do
-    mysqldump $DB > $Temp_Backup"/"$Today"/"$DB".sql";
+# Backup all databases
+DB_DUMP_FOLDER="${Temp_Backup}/${Today}/db_dumps"
+mkdir -p "$DB_DUMP_FOLDER"
+for DB in $(mysql -e 'show databases' -s --skip-column-names | grep -Ev '^(information_schema|performance_schema|mysql|sys)$'); do
+  mysqldump "$DB" > "${DB_DUMP_FOLDER}/${DB}.sql"
 done
 
+# Upload backup (Azure Blob)
+UPLOAD_SUCCESS=0
+if [[ "$BACKUP_TARGET" =~ ^https:// ]]; then
+  if command -v az >/dev/null 2>&1; then
+    az storage blob upload-batch --destination "$BACKUP_TARGET" --source "$Temp_Backup" --overwrite && UPLOAD_SUCCESS=1
+  else
+    UPLOAD_SUCCESS=2
+    UPLOAD_ERROR="Azure CLI not installed!"
+  fi
+else
+  # Local copy
+  mkdir -p "$BACKUP_TARGET"
+  cp -r "$Temp_Backup"/* "$BACKUP_TARGET"/ && UPLOAD_SUCCESS=1
+fi
 
+# Compose summary
+if [[ $UPLOAD_SUCCESS -eq 1 ]]; then
+  SUBJECT="$Today Backup Success"
+  BODY="Backup completed successfully.
 
-# Upload the files to Azure Blob Storage
-echo uploading to Azure
-az storage blob upload-batch --destination $Azure_Blob --source $Temp_Backup --overwrite
-# clear
-# Clearing Temp Backup
-echo "Removing the local temp files"
-rm -r -f $Temp_Backup
-echo "Files removed"
-echo $Today" backup has been run" | mail -s $Today"'s web server backup has now been run" -r servers@andykemp.com andrew@kemponline.co.uk
+Files backed up:
+- $Website_Path
+- $Web_Config
+- $Postfix_Config
+- $SASL_Passwd
+- $Cert_Directory
+- All MySQL/MariaDB databases
+
+Backup archive: $Backup_Archive
+Database dumps: $DB_DUMP_FOLDER
+
+Backup uploaded to: $BACKUP_TARGET
+
+$(date)"
+else
+  SUBJECT="$Today Backup ERROR"
+  BODY="Backup failed to upload!
+
+Error: ${UPLOAD_ERROR:-'Unknown error'}
+
+$(date)"
+fi
+
+# Clean up temp files
+rm -rf "$Temp_Backup"
+
+# Mail notification
+echo "$BODY" | mail -s "$SUBJECT" -r "$REPORT_FROM" "$REPORT_TO"
+
+exit 0

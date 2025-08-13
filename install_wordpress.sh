@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # LAMP + WordPress installer for Ubuntu
-# Prompts for a single site hostname (e.g., www.example.com or dev.example.com)
-# Sets DocumentRoot to /var/www/<hostname>
-# Installs Apache, PHP, MariaDB, configures SSL (Let's Encrypt, custom, or self-signed),
-# creates DB/user, and prepares WordPress.
-# Apache vhost is minimal: no ServerAlias, no Rewrite, only Redirect for HTTP->HTTPS.
+# Includes backup script, scheduling, and SMTP notification setup
 
 set -Eeuo pipefail
 
@@ -62,10 +58,8 @@ ask_hidden() {
 
 gen_password() {
   if command -v openssl >/dev/null 2>&1; then
-    # URL-safe base64, trimmed to 24 chars
     openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_' | cut -c1-24
   else
-    # Fallback to alphanumerics only
     tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
   fi
 }
@@ -96,16 +90,13 @@ while :; do
   if is_valid_hostname "$SITE_HOST"; then break; else warn "Invalid hostname, try again."; fi
 done
 
-# Derive an email domain from the hostname for default ServerAdmin
 EMAIL_DOMAIN="${SITE_HOST#*.}"
 [[ "$EMAIL_DOMAIN" == "$SITE_HOST" ]] && EMAIL_DOMAIN="$SITE_HOST"
 ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
 
-# Web root defaults to /var/www/<hostname>
 WEBROOT_DEFAULT="/var/www/${SITE_HOST}"
 ask "Web root directory" "$WEBROOT_DEFAULT" WEBROOT
 
-# Database inputs
 DB_NAME_DEFAULT="db_$(normalize_for_mysql "$SITE_HOST")"
 DB_USER_DEFAULT="user_$(normalize_for_mysql "$SITE_HOST")"
 ask "MariaDB database name" "$DB_NAME_DEFAULT" DB_NAME
@@ -142,7 +133,6 @@ info "Updating package list and installing required packages..."
 apt-get update
 apt-get install -y apache2 php libsasl2-modules libapache2-mod-php php-gd mariadb-server mariadb-client php-mysql mailutils php-gmp php-mbstring php-xml php-curl wget rsync unzip tar openssl curl
 
-# SSL helpers if LE chosen
 if [[ "$SSL_OPTION" == "1" ]]; then
   apt-get install -y certbot python3-certbot-apache
 fi
@@ -259,7 +249,6 @@ elif [[ "$SSL_OPTION" == "3" ]]; then
 EOT
 )
 elif [[ "$SSL_OPTION" == "1" ]]; then
-  # Temporary self-signed so Apache can start before LE issuance
   mkdir -p /var/cert/selfsigned
   SS_CERT="/var/cert/selfsigned/${SITE_HOST}.crt"
   SS_KEY="/var/cert/selfsigned/${SITE_HOST}.key"
@@ -329,7 +318,6 @@ APACHECONF
 
 a2ensite "${SITE_HOST}.conf" >/dev/null
 
-# If UFW is active, open Apache Full
 if command_exists ufw && ufw status | grep -q "Status: active"; then
   ufw allow 'Apache Full' || true
 fi
@@ -349,14 +337,12 @@ if [[ "$SSL_OPTION" == "1" ]]; then
 
   LE_LIVE_DIR="/etc/letsencrypt/live/${SITE_HOST}"
   if [[ -d "$LE_LIVE_DIR" ]]; then
-    # Replace temporary self-signed paths with LE paths
     sed -i "s#SSLCertificateFile .*#SSLCertificateFile ${LE_LIVE_DIR}/fullchain.pem#g" "$VHOST_FILE"
     sed -i "s#SSLCertificateKeyFile .*#SSLCertificateKeyFile ${LE_LIVE_DIR}/privkey.pem#g" "$VHOST_FILE"
     info "Reloading Apache with Let's Encrypt certificate..."
     apache2ctl configtest
     systemctl reload apache2
 
-    # Ensure auto-renew reloads Apache
     systemctl enable certbot.timer || true
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh <<'HOOK'
@@ -415,3 +401,65 @@ echo "Apache config file contents:"
 echo "-------------------------------------------"
 cat /etc/apache2/sites-available/${SITE_HOST}.conf
 echo "-------------------------------------------"
+
+# --------- Backup Script and Mail Setup ---------
+BACKUP_SCRIPT_URL="https://raw.githubusercontent.com/andrew-kemp/SelfhostedWP/main/backup.sh"
+BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
+BACKUP_CONF_PATH="/etc/selfhostedwp_backup.conf"
+
+read -p "Enter the backup target location (Azure Blob SAS URL or a local path): " BACKUP_TARGET
+read -p "Enter the daily backup time (24h format, e.g. 02:00): " BACKUP_TIME
+CRON_HOUR=$(echo "$BACKUP_TIME" | cut -d: -f1)
+CRON_MIN=$(echo "$BACKUP_TIME" | cut -d: -f2)
+read -p "Enter the sender email address for backup reports: " REPORT_FROM
+read -p "Enter the recipient email address for backup reports: " REPORT_TO
+read -p "Enter the SMTP server (e.g. mail.smtp2go.com): " SMTP_SERVER
+read -p "Enter the SMTP port (default 587): " SMTP_PORT
+SMTP_PORT=${SMTP_PORT:-587}
+read -p "Enter the SMTP username: " SMTP_USER
+ask_hidden "Enter the SMTP password: " "" SMTP_PASS
+
+cat > "$BACKUP_CONF_PATH" <<EOF
+BACKUP_TARGET="$BACKUP_TARGET"
+REPORT_FROM="$REPORT_FROM"
+REPORT_TO="$REPORT_TO"
+SMTP_SERVER="$SMTP_SERVER"
+SMTP_PORT="$SMTP_PORT"
+SMTP_USER="$SMTP_USER"
+SMTP_PASS="$SMTP_PASS"
+EOF
+
+curl -fsSL "$BACKUP_SCRIPT_URL" -o "$BACKUP_SCRIPT_PATH"
+chmod +x "$BACKUP_SCRIPT_PATH"
+
+CRON_JOB="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_PATH"
+(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_PATH"; echo "$CRON_JOB") | crontab -
+
+info "Backup script installed at $BACKUP_SCRIPT_PATH"
+info "Daily backup scheduled at $BACKUP_TIME"
+info "Backup configuration written to $BACKUP_CONF_PATH"
+
+info "Configuring Postfix for SMTP relay..."
+debconf-set-selections <<< "postfix postfix/mailname string $(hostname -f)"
+debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
+apt-get install -y postfix mailutils
+
+postconf -e "relayhost = [$SMTP_SERVER]:$SMTP_PORT"
+postconf -e "smtp_sasl_auth_enable = yes"
+postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+postconf -e "smtp_sasl_security_options = noanonymous"
+postconf -e "smtp_tls_security_level = may"
+postconf -e "smtp_use_tls = yes"
+postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
+postconf -e "myhostname = $(hostname -f)"
+postconf -e "myorigin = /etc/mailname"
+
+echo "[$SMTP_SERVER]:$SMTP_PORT $SMTP_USER:$SMTP_PASS" > /etc/postfix/sasl_passwd
+postmap /etc/postfix/sasl_passwd
+chmod 600 /etc/postfix/sasl_passwd
+
+systemctl restart postfix
+
+info "Postfix SMTP relay configured."
+echo "SelfhostedWP backup install completed." | mail -s "Backup install test" -r "$REPORT_FROM" "$REPORT_TO"
+info "Test email sent to $REPORT_TO from $REPORT_FROM"
