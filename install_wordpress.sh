@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LAMP + WordPress installer for Ubuntu
-# Includes backup script, scheduling, and SMTP notification setup
+# Includes backup script, scheduling, SMTP notification, and install report
 
 set -Eeuo pipefail
 
@@ -82,7 +82,7 @@ detect_ubuntu
 INVOKING_USER="${SUDO_USER:-root}"
 INVOKING_GROUP="$(id -gn "$INVOKING_USER")"
 
-# ---------- Prompts (simplified to a single FQDN) ----------
+# ---------- Prompts ----------
 DEFAULT_HOST="www.example.com"
 while :; do
   ask "Enter your site hostname (FQDN, e.g. www.andykemp.com or dev.andykemp.com)" "$DEFAULT_HOST" SITE_HOST
@@ -361,7 +361,6 @@ chown -R www-data:www-data "$WEBROOT"
 find "$WEBROOT" -type d -exec chmod 755 {} \;
 find "$WEBROOT" -type f -exec chmod 644 {} \;
 
-# ---------- Summary ----------
 echo
 echo "-------------------------------------------"
 echo "Installation complete!"
@@ -439,7 +438,11 @@ curl -fsSL "$BACKUP_SCRIPT_URL" -o "$BACKUP_SCRIPT_PATH"
 chmod +x "$BACKUP_SCRIPT_PATH"
 
 CRON_JOB="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_PATH"
-(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_PATH"; echo "$CRON_JOB") | crontab -
+CRONTAB_TMP=$(mktemp)
+crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_PATH" > "$CRONTAB_TMP" || true
+echo "$CRON_JOB" >> "$CRONTAB_TMP"
+crontab "$CRONTAB_TMP"
+rm -f "$CRONTAB_TMP"
 
 info "Backup script installed at $BACKUP_SCRIPT_PATH"
 info "Daily backup scheduled at $BACKUP_TIME"
@@ -470,14 +473,6 @@ info "Postfix SMTP relay configured."
 echo "SelfhostedWP backup install completed." | mail -s "Backup install test" -r "$REPORT_FROM" "$REPORT_TO"
 info "Test email sent to $REPORT_TO from $REPORT_FROM"
 
-echo
-read -p "Would you like to run a test backup now to verify everything is working? (y/n): " RUN_TEST_BACKUP
-if [[ "${RUN_TEST_BACKUP,,}" == "y" ]]; then
-  info "Running test backup..."
-  /usr/local/bin/backup.sh
-  info "Test backup completed. Please check your backup destination and notification email."
-fi
-
 INSTALL_REPORT="/tmp/install_report_$(date +%Y%m%d_%H%M%S).txt"
 cat > "$INSTALL_REPORT" <<EOF
 SelfhostedWP Install Report - $(date)
@@ -502,3 +497,11 @@ EOF
 mail -s "SelfhostedWP install report: ${SITE_HOST}" -r "$REPORT_FROM" "$REPORT_TO" < "$INSTALL_REPORT"
 info "Install report emailed to $REPORT_TO from $REPORT_FROM"
 rm -f "$INSTALL_REPORT"
+
+echo
+read -p "Would you like to run a test backup now to verify everything is working? (y/n): " RUN_TEST_BACKUP
+if [[ "${RUN_TEST_BACKUP,,}" == "y" ]]; then
+  info "Running test backup..."
+  /usr/local/bin/backup.sh
+  info "Test backup completed. Please check your backup destination and notification email."
+fi
