@@ -1,93 +1,57 @@
 #!/usr/bin/env bash
-# Automated web server backup & notification script
-# Reads config from /etc/selfhostedwp_backup.conf
-
 set -euo pipefail
 
-# Load config
-CONFIG_PATH="/etc/selfhostedwp_backup.conf"
-if [[ ! -f "$CONFIG_PATH" ]]; then
-  echo "Backup config file $CONFIG_PATH not found!"
+CONFIG_FILE="/etc/selfhostedwp_backup.conf"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Config file $CONFIG_FILE not found!"
   exit 1
 fi
-source "$CONFIG_PATH"
 
-# Backup variables
-Today=$(date +%A)
-Temp_Backup="/temp_backup"
-Backup_Archive="${Temp_Backup}/${Today}/backup.tar.gz"
-Website_Path="/var/www/"
-Web_Config="/etc/apache2/sites-available/"
-Postfix_Config="/etc/postfix/main.cf"
-SASL_Passwd="/etc/postfix/sasl_passwd"
-Cert_Directory="/var/cert"
+set -a
+source "$CONFIG_FILE"
+set +a
 
-# Prepare temp folder
-rm -rf "$Temp_Backup"
-mkdir -p "${Temp_Backup}/${Today}"
+Today="$(date +%A)"
+Temp_Backup="/tmp/temp_backup_$Today"
+Backup_Archive="${Temp_Backup}/backup.tar.gz"
 
-# Create archive: site files + configs + certs
+mkdir -p "$Temp_Backup"
+
+# Archive website files and config files
 tar -cpvzf "$Backup_Archive" \
-  "$Website_Path" \
-  "$Web_Config" \
-  "$Postfix_Config" \
-  "$SASL_Passwd" \
-  "$Cert_Directory"
+  "$WEBSITE_PATH" \
+  "$WEB_CONFIG" \
+  "$POSTFIX_CONFIG" \
+  "$SASL_PASSWD" \
+  "$CERT_DIRECTORY"
 
-# Backup all databases
-DB_DUMP_FOLDER="${Temp_Backup}/${Today}/db_dumps"
-mkdir -p "$DB_DUMP_FOLDER"
-for DB in $(mysql -e 'show databases' -s --skip-column-names | grep -Ev '^(information_schema|performance_schema|mysql|sys)$'); do
-  mysqldump "$DB" > "${DB_DUMP_FOLDER}/${DB}.sql"
+# Backup all non-system databases
+for DB in $(mysql -e "show databases" -s --skip-column-names | grep -Ev "^(information_schema|performance_schema|mysql|sys)$"); do
+    mysqldump "$DB" > "$Temp_Backup/${DB}.sql"
 done
 
-# Upload backup (Azure Blob)
-UPLOAD_SUCCESS=0
-if [[ "$BACKUP_TARGET" =~ ^https:// ]]; then
-  if command -v az >/dev/null 2>&1; then
-    az storage blob upload-batch --destination "$BACKUP_TARGET" --source "$Temp_Backup" --overwrite && UPLOAD_SUCCESS=1
-  else
-    UPLOAD_SUCCESS=2
-    UPLOAD_ERROR="Azure CLI not installed!"
-  fi
+# Upload backup using Azure CLI, placing files in a folder named after the day
+if command -v az >/dev/null 2>&1; then
+  Azure_Blob_Url="$BACKUP_TARGET"
+  Azure_Account_Name="$(echo "$Azure_Blob_Url" | awk -F[/:] '{print $4}' | awk -F. '{print $1}')"
+  Azure_Container_Name="$(echo "$Azure_Blob_Url" | awk -F[/:] '{print $5}' | awk -F'?' '{print $1}')"
+  Azure_SAS_Token="$(echo "$Azure_Blob_Url" | awk -F'?' '{print $2}')"
+
+  echo "Uploading to Azure Blob Storage container: $Azure_Container_Name/$Today"
+  az storage blob upload-batch \
+    --account-name "$Azure_Account_Name" \
+    --destination "$Azure_Container_Name" \
+    --source "$Temp_Backup" \
+    --sas-token "$Azure_SAS_Token" \
+    --destination-path "$Today" \
+    --overwrite
 else
-  # Local copy
-  mkdir -p "$BACKUP_TARGET"
-  cp -r "$Temp_Backup"/* "$BACKUP_TARGET"/ && UPLOAD_SUCCESS=1
+  echo "Azure CLI (az) not found! Please install Azure CLI to upload to Azure Blob Storage."
+  exit 1
 fi
 
-# Compose summary
-if [[ $UPLOAD_SUCCESS -eq 1 ]]; then
-  SUBJECT="$Today Backup Success"
-  BODY="Backup completed successfully.
-
-Files backed up:
-- $Website_Path
-- $Web_Config
-- $Postfix_Config
-- $SASL_Passwd
-- $Cert_Directory
-- All MySQL/MariaDB databases
-
-Backup archive: $Backup_Archive
-Database dumps: $DB_DUMP_FOLDER
-
-Backup uploaded to: $BACKUP_TARGET
-
-$(date)"
-else
-  SUBJECT="$Today Backup ERROR"
-  BODY="Backup failed to upload!
-
-Error: ${UPLOAD_ERROR:-'Unknown error'}
-
-$(date)"
-fi
-
-# Clean up temp files
+echo "Removing the local temp files"
 rm -rf "$Temp_Backup"
+echo "Files removed"
 
-# Mail notification
-echo "$BODY" | mail -s "$SUBJECT" -r "$REPORT_FROM" "$REPORT_TO"
-
-exit 0
+echo "$Today backup was successful and uploaded to Azure Blob Storage." | mail -s "$Today web server backup complete" -r "$REPORT_FROM" "$REPORT_TO"
