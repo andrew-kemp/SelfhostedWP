@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SelfhostedWP Automated Installer & Backup for Ubuntu
 # Improved: Per-site SSL certs included in site backup archives, global configs also backed up
+# Emails site setup summary to configured address after each site install
 
 set -Eeuo pipefail
 
@@ -596,6 +597,30 @@ if [[ "$FIRST_RUN" == true ]]; then
     /usr/local/bin/backup.sh
     info "Test backup completed. Please check your backup destination and notification email."
   fi
+fi
+
+# --------- EMAIL SITE CONFIG TO ADMIN AFTER EVERY INSTALL ---------
+if [[ -f /etc/selfhostedwp_backup.conf ]]; then
+  # Use configured REPORT_FROM and REPORT_TO from backup.conf
+  source /etc/selfhostedwp_backup.conf
+  SITE_REPORT="/tmp/site_report_${SITE_HOST}_$(date +%Y%m%d_%H%M%S).txt"
+  cat > "$SITE_REPORT" <<EOF
+New WordPress Site Installed: ${SITE_HOST}
+
+Site: https://${SITE_HOST}
+DocumentRoot: ${WEBROOT}
+Apache vhost: ${VHOST_FILE}
+
+Database name: ${DB_NAME}
+Database user: ${DB_USER}
+Database password: ${DB_PASS}
+
+SSL option: ${SSL_OPTION}
+EOF
+
+  mail -s "New WordPress site installed: ${SITE_HOST}" -a "From: SelfhostedWP <$REPORT_FROM>" "$REPORT_TO" < "$SITE_REPORT"
+  info "Site install report emailed to $REPORT_TO from $REPORT_FROM"
+  rm -f "$SITE_REPORT"
 fi
 
 # Installation summary
