@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# LAMP + WordPress installer for Ubuntu
-# Includes embedded backup script, scheduling, SMTP relay setup, install report, and Azure Blob backup
+# SelfhostedWP Automated Installer & Backup for Ubuntu
+# - Installs per-site WordPress in /var/www/<site>
+# - Sets up Apache, MariaDB, PHP, SSL, Postfix SMTP relay
+# - Backs up ALL sites in /var/www and ALL vhost configs
+# - Schedules daily backup to Azure Blob Storage with email notifications
 
 set -Eeuo pipefail
 
@@ -104,8 +107,7 @@ EMAIL_DOMAIN="${SITE_HOST#*.}"
 [[ "$EMAIL_DOMAIN" == "$SITE_HOST" ]] && EMAIL_DOMAIN="$SITE_HOST"
 ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
 
-WEBROOT="/var/www"
-VHOST_FILE="/etc/apache2/sites-available"
+WEBROOT="/var/www/${SITE_HOST}" # Per-site WordPress install target
 
 DB_NAME_DEFAULT="db_$(normalize_for_mysql "$SITE_HOST")"
 DB_USER_DEFAULT="user_$(normalize_for_mysql "$SITE_HOST")"
@@ -280,17 +282,17 @@ EOT
 fi
 
 # ---------- Apache vhost ----------
-VHOST_FILE_SINGLE="/etc/apache2/sites-available/${SITE_HOST}.conf"
-info "Creating Apache vhost: $VHOST_FILE_SINGLE"
+VHOST_FILE="/etc/apache2/sites-available/${SITE_HOST}.conf"
+info "Creating Apache vhost: $VHOST_FILE"
 
-cat > "$VHOST_FILE_SINGLE" <<APACHECONF
+cat > "$VHOST_FILE" <<APACHECONF
 # Managed by install script
 <VirtualHost *:80>
     ServerName ${SITE_HOST}
 
     # Let’s Encrypt challenge support (do NOT redirect these)
-    Alias /.well-known/acme-challenge /var/www/${SITE_HOST}/.well-known/acme-challenge
-    <Directory "/var/www/${SITE_HOST}/.well-known/acme-challenge">
+    Alias /.well-known/acme-challenge $WEBROOT/.well-known/acme-challenge
+    <Directory "$WEBROOT/.well-known/acme-challenge">
         Options None
         AllowOverride None
         Require all granted
@@ -306,9 +308,9 @@ cat > "$VHOST_FILE_SINGLE" <<APACHECONF
 <VirtualHost *:443>
     ServerName ${SITE_HOST}
     ServerAdmin ${ADMIN_EMAIL}
-    DocumentRoot /var/www/${SITE_HOST}
+    DocumentRoot ${WEBROOT}
 
-    <Directory /var/www/${SITE_HOST}/>
+    <Directory ${WEBROOT}/>
         AllowOverride All
         Require all granted
     </Directory>
@@ -344,13 +346,13 @@ systemctl restart apache2
 # ---------- Let's Encrypt (optional) ----------
 if [[ "$SSL_OPTION" == "1" ]]; then
   info "Obtaining Let's Encrypt certificates for ${SITE_HOST}..."
-  certbot certonly --webroot -w "/var/www/${SITE_HOST}" -d "$SITE_HOST" \
+  certbot certonly --webroot -w "$WEBROOT" -d "$SITE_HOST" \
     --email "$ADMIN_EMAIL" --agree-tos --no-eff-email || warn "Certbot failed. Self-signed cert remains in use."
 
   LE_LIVE_DIR="/etc/letsencrypt/live/${SITE_HOST}"
   if [[ -d "$LE_LIVE_DIR" ]]; then
-    sed -i "s#SSLCertificateFile .*#SSLCertificateFile ${LE_LIVE_DIR}/fullchain.pem#g" "$VHOST_FILE_SINGLE"
-    sed -i "s#SSLCertificateKeyFile .*#SSLCertificateKeyFile ${LE_LIVE_DIR}/privkey.pem#g" "$VHOST_FILE_SINGLE"
+    sed -i "s#SSLCertificateFile .*#SSLCertificateFile ${LE_LIVE_DIR}/fullchain.pem#g" "$VHOST_FILE"
+    sed -i "s#SSLCertificateKeyFile .*#SSLCertificateKeyFile ${LE_LIVE_DIR}/privkey.pem#g" "$VHOST_FILE"
     info "Reloading Apache with Let's Encrypt certificate..."
     apache2ctl configtest
     systemctl reload apache2
@@ -377,8 +379,8 @@ echo
 echo "-------------------------------------------"
 echo "Installation complete!"
 echo "Site: https://${SITE_HOST}"
-echo "DocumentRoot: /var/www/${SITE_HOST}"
-echo "Apache vhost: ${VHOST_FILE_SINGLE}"
+echo "DocumentRoot: ${WEBROOT}"
+echo "Apache vhost: ${VHOST_FILE}"
 echo
 echo "Database name: ${DB_NAME}"
 echo "Database user: ${DB_USER}"
@@ -410,7 +412,7 @@ echo "-------------------------------------------"
 echo
 echo "Apache config file contents:"
 echo "-------------------------------------------"
-cat /etc/apache2/sites-available/${SITE_HOST}.conf
+cat "${VHOST_FILE}"
 echo "-------------------------------------------"
 
 info "Setting ownership for /var/www to www-data..."
@@ -532,7 +534,7 @@ cat > "$INSTALL_REPORT" <<EOF
 SelfhostedWP Install Report - $(date)
 
 Site: https://${SITE_HOST}
-DocumentRoot: /var/www/${SITE_HOST}
+DocumentRoot: ${WEBROOT}
 
 Database name: ${DB_NAME}
 Database user: ${DB_USER}
