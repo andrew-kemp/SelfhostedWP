@@ -104,8 +104,8 @@ EMAIL_DOMAIN="${SITE_HOST#*.}"
 [[ "$EMAIL_DOMAIN" == "$SITE_HOST" ]] && EMAIL_DOMAIN="$SITE_HOST"
 ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
 
-WEBROOT_DEFAULT="/var/www/${SITE_HOST}"
-ask "Web root directory" "$WEBROOT_DEFAULT" WEBROOT
+WEBROOT="/var/www"
+VHOST_FILE="/etc/apache2/sites-available"
 
 DB_NAME_DEFAULT="db_$(normalize_for_mysql "$SITE_HOST")"
 DB_USER_DEFAULT="user_$(normalize_for_mysql "$SITE_HOST")"
@@ -280,10 +280,10 @@ EOT
 fi
 
 # ---------- Apache vhost ----------
-VHOST_FILE="/etc/apache2/sites-available/${SITE_HOST}.conf"
-info "Creating Apache vhost: $VHOST_FILE"
+VHOST_FILE_SINGLE="/etc/apache2/sites-available/${SITE_HOST}.conf"
+info "Creating Apache vhost: $VHOST_FILE_SINGLE"
 
-cat > "$VHOST_FILE" <<APACHECONF
+cat > "$VHOST_FILE_SINGLE" <<APACHECONF
 # Managed by install script
 <VirtualHost *:80>
     ServerName ${SITE_HOST}
@@ -306,9 +306,9 @@ cat > "$VHOST_FILE" <<APACHECONF
 <VirtualHost *:443>
     ServerName ${SITE_HOST}
     ServerAdmin ${ADMIN_EMAIL}
-    DocumentRoot ${WEBROOT}
+    DocumentRoot /var/www/${SITE_HOST}
 
-    <Directory ${WEBROOT}/>
+    <Directory /var/www/${SITE_HOST}/>
         AllowOverride All
         Require all granted
     </Directory>
@@ -344,13 +344,13 @@ systemctl restart apache2
 # ---------- Let's Encrypt (optional) ----------
 if [[ "$SSL_OPTION" == "1" ]]; then
   info "Obtaining Let's Encrypt certificates for ${SITE_HOST}..."
-  certbot certonly --webroot -w "$WEBROOT" -d "$SITE_HOST" \
+  certbot certonly --webroot -w "/var/www/${SITE_HOST}" -d "$SITE_HOST" \
     --email "$ADMIN_EMAIL" --agree-tos --no-eff-email || warn "Certbot failed. Self-signed cert remains in use."
 
   LE_LIVE_DIR="/etc/letsencrypt/live/${SITE_HOST}"
   if [[ -d "$LE_LIVE_DIR" ]]; then
-    sed -i "s#SSLCertificateFile .*#SSLCertificateFile ${LE_LIVE_DIR}/fullchain.pem#g" "$VHOST_FILE"
-    sed -i "s#SSLCertificateKeyFile .*#SSLCertificateKeyFile ${LE_LIVE_DIR}/privkey.pem#g" "$VHOST_FILE"
+    sed -i "s#SSLCertificateFile .*#SSLCertificateFile ${LE_LIVE_DIR}/fullchain.pem#g" "$VHOST_FILE_SINGLE"
+    sed -i "s#SSLCertificateKeyFile .*#SSLCertificateKeyFile ${LE_LIVE_DIR}/privkey.pem#g" "$VHOST_FILE_SINGLE"
     info "Reloading Apache with Let's Encrypt certificate..."
     apache2ctl configtest
     systemctl reload apache2
@@ -377,8 +377,8 @@ echo
 echo "-------------------------------------------"
 echo "Installation complete!"
 echo "Site: https://${SITE_HOST}"
-echo "DocumentRoot: ${WEBROOT}"
-echo "Apache vhost: ${VHOST_FILE}"
+echo "DocumentRoot: /var/www/${SITE_HOST}"
+echo "Apache vhost: ${VHOST_FILE_SINGLE}"
 echo
 echo "Database name: ${DB_NAME}"
 echo "Database user: ${DB_USER}"
@@ -440,8 +440,8 @@ cat > "$BACKUP_CONF_PATH" <<EOF
 BACKUP_TARGET="$BACKUP_TARGET"
 REPORT_FROM="$REPORT_FROM"
 REPORT_TO="$REPORT_TO"
-WEBROOT="$WEBROOT"
-VHOST_FILE="$VHOST_FILE"
+WEBROOT="/var/www"
+VHOST_FILE="/etc/apache2/sites-available"
 EOF
 
 # Install embedded backup script
@@ -532,7 +532,7 @@ cat > "$INSTALL_REPORT" <<EOF
 SelfhostedWP Install Report - $(date)
 
 Site: https://${SITE_HOST}
-DocumentRoot: ${WEBROOT}
+DocumentRoot: /var/www/${SITE_HOST}
 
 Database name: ${DB_NAME}
 Database user: ${DB_USER}
