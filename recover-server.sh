@@ -1,5 +1,4 @@
-#!/usr/bin/env bash
-: '
+cat <<'EOF'
  __        ______    ____                           _  ___ _   
  \ \      / /  _ \  |  _ \ ___  ___  ___ _   _  ___| |/ (_) |_ 
   \ \ /\ / /| |_) | | |_) / _ \/ __|/ __| | | |/ _ \ ' /| | __|
@@ -7,9 +6,9 @@
     \_/\_/  |_|     |_| \_\___||___/\___|\__,_|\___|_|\_\_|\__|
                                                                
 
-          Automated WordPress Installer & Backup          
+      Automated WordPress Installer & Backup
 
-'
+EOF
 # SelfhostedWP Full Restore + Backup Setup Script
 # - Restores all/selected sites from Azure Blob backup
 # - Resets DB/user/password and updates wp-config.php
