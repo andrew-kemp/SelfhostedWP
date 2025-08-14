@@ -40,7 +40,8 @@ If your domain uses a multi-part TLD (e.g., `.co.uk`, `.org.uk`), it is preserve
 
 1. **Run the script as root (or with sudo):**
     ```bash
-    sudo bash wp_install.sh
+    curl -fsSL https://raw.githubusercontent.com/andrew-kemp/SelfhostedWP/refs/heads/main/wordpress_install.sh -o wordpress_install.sh
+    sudo bash wordpress_install.sh.sh
     ```
 
 2. **Follow the prompts:**
