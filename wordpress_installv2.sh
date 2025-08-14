@@ -1,20 +1,10 @@
 #!/usr/bin/env bash
-# WordPress Multi-site Installer & Backup for Ubuntu
-# Uses first site domain for mail server configuration!
-# Emails site setup summary and backup reports from backup@<first-domain> to configured address
+# SelfhostedWP Automated Installer & Backup for Ubuntu
+# Interactive multi-site installer with improved backup reporting
 
 set -Eeuo pipefail
 
-send_email() {
-  # Usage: send_email "Subject" "from@domain.com" "to@domain.com" "Body"
-  local subject="$1"
-  local from="$2"
-  local to="$3"
-  local body="$4"
-  echo "$body" | mail -s "$subject" -r "$from" "$to"
-}
-
-# ---------- Helpers ----------
+# --- Helpers ---
 err() { echo "Error: $*" >&2; }
 info() { echo -e "\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\033[1;33m!!\033[0m $*"; }
@@ -106,15 +96,15 @@ get_root_domain() {
   fi
 }
 
-require_root
-detect_ubuntu
-
 INVOKING_USER="${SUDO_USER:-root}"
 INVOKING_GROUP="$(id -gn "$INVOKING_USER")"
 SITES_LIST="/etc/selfhostedwp/sites.list"
 BACKUP_CONF_PATH="/etc/selfhostedwp_backup.conf"
 BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
 FIRST_RUN=false
+
+require_root
+detect_ubuntu
 
 if [[ ! -f "$SITES_LIST" ]]; then
   FIRST_RUN=true
@@ -135,7 +125,6 @@ if [[ "$FIRST_RUN" == true ]]; then
 fi
 
 # --- Main interactive loop for multi-site setup ---
-FIRST_SITE_HOST=""
 while true; do
   # --- Site prompts ---
   DEFAULT_HOST="www.example.com"
@@ -144,12 +133,6 @@ while true; do
     SITE_HOST="$(tolower "$SITE_HOST")"
     if is_valid_hostname "$SITE_HOST"; then break; else warn "Invalid hostname, try again."; fi
   done
-
-  # Set MAIL_DOMAIN from the first site
-  if [[ -z "$FIRST_SITE_HOST" ]]; then
-    FIRST_SITE_HOST="$SITE_HOST"
-    MAIL_DOMAIN="$(get_root_domain "$FIRST_SITE_HOST")"
-  fi
 
   EMAIL_DOMAIN="$(get_root_domain "$SITE_HOST")"
   ask "ServerAdmin email (also used for Let's Encrypt)" "admin@${EMAIL_DOMAIN}" ADMIN_EMAIL
@@ -405,28 +388,6 @@ HOOK
     info "Site $SITE_HOST already exists in $SITES_LIST"
   fi
 
-  # --- Email site config to admin ---
-  if [[ -f "$BACKUP_CONF_PATH" ]]; then
-    source "$BACKUP_CONF_PATH"
-    SITE_REPORT="/tmp/site_report_${SITE_HOST}_$(date +%Y%m%d_%H%M%S).txt"
-    cat > "$SITE_REPORT" <<EOF
-New WordPress Site Installed: ${SITE_HOST}
-
-Site: https://${SITE_HOST}
-DocumentRoot: ${WEBROOT}
-Apache vhost: ${VHOST_FILE}
-
-Database name: ${DB_NAME}
-Database user: ${DB_USER}
-Database password: ${DB_PASS}
-
-SSL option: ${SSL_OPTION}
-EOF
-    send_email "New WordPress site installed: ${SITE_HOST}" "backup@${MAIL_DOMAIN}" "$REPORT_TO" "$(cat "$SITE_REPORT")"
-    info "Site install report emailed to $REPORT_TO"
-    rm -f "$SITE_REPORT"
-  fi
-
   echo
   echo "-------------------------------------------"
   echo "Installation complete!"
@@ -477,52 +438,20 @@ if [[ "$FIRST_RUN" == true ]]; then
   SMTP_PORT=${SMTP_PORT:-587}
   read -p "Enter the SMTP username: " SMTP_USER
   ask_hidden "Enter the SMTP password: " "" SMTP_PASS
+  MAIL_DOMAIN="$(get_root_domain "$(hostname -f)")"
 
-  # Save MAIL_DOMAIN for backup config
   cat > "$BACKUP_CONF_PATH" <<EOF
 BACKUP_TARGET="$BACKUP_TARGET"
-REPORT_FROM="backup@${MAIL_DOMAIN}"
+REPORT_FROM="$REPORT_FROM"
 REPORT_TO="$REPORT_TO"
 SITES_LIST="$SITES_LIST"
 BACKUP_TIME="$BACKUP_TIME"
-MAIL_DOMAIN="$MAIL_DOMAIN"
 EOF
-
-  # --- Postfix SMTP setup using first site domain ---
-  debconf-set-selections <<< "postfix postfix/mailname string $MAIL_DOMAIN"
-  debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
-  apt-get install -y postfix mailutils
-
-  postconf -e "myhostname = $MAIL_DOMAIN"
-  postconf -e "myorigin = /etc/mailname"
-  postconf -e "relayhost = [$SMTP_SERVER]:$SMTP_PORT"
-  postconf -e "smtp_sasl_auth_enable = yes"
-  postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
-  postconf -e "smtp_sasl_security_options = noanonymous"
-  postconf -e "smtp_tls_security_level = may"
-  postconf -e "smtp_use_tls = yes"
-  postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
-
-  echo "[$SMTP_SERVER]:$SMTP_PORT $SMTP_USER:$SMTP_PASS" > /etc/postfix/sasl_passwd
-  postmap /etc/postfix/sasl_passwd
-  chmod 600 /etc/postfix/sasl_passwd
-
-  systemctl restart postfix
-
-  info "Postfix SMTP relay configured."
 
   # --- Install improved backup script ---
   cat > "$BACKUP_SCRIPT_PATH" <<'EOS'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
-send_email() {
-  local subject="$1"
-  local from="$2"
-  local to="$3"
-  local body="$4"
-  echo "$body" | mail -s "$subject" -r "$from" "$to"
-}
 
 CONFIG_FILE="/etc/selfhostedwp_backup.conf"
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -532,7 +461,7 @@ fi
 set -a; source "$CONFIG_FILE"; set +a
 
 DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
-HOSTNAME="$(hostname -f)"
+HOSTNAME="$(hostname -s)"  # Use short hostname (webserver1)
 SCRIPT_VERSION="1.3.0"
 BACKUP_START="$(date -u '+%Y-%m-%d %H:%M:%S')"
 Today="$(date +%A)"
@@ -682,7 +611,8 @@ fi
 BACKUP_END="$(date -u '+%Y-%m-%d %H:%M:%S')"
 DURATION=$(( $(date -ud "$BACKUP_END" +%s) - $(date -ud "$BACKUP_START" +%s) ))
 
-REPORT_SUBJECT="WP Backup Report $BACKUP_STATUS – $HOSTNAME – $BACKUP_END"
+# Compose email with UTF-8 encoding and custom From header
+REPORT_SUBJECT="WP Backup Report — $BACKUP_STATUS - $HOSTNAME - $BACKUP_END"
 REPORT_BODY=""
 REPORT_BODY+="WP Backup Report — $BACKUP_STATUS\n"
 REPORT_BODY+="Host: $HOSTNAME\n"
@@ -706,12 +636,21 @@ REPORT_BODY+="Duration: ${DURATION}s\n"
 REPORT_BODY+="\nNext Scheduled Backup: ${BACKUP_TIME:-Not configured}\n"
 REPORT_BODY+="\nScript: /usr/local/bin/backup.sh\n"
 
-send_email "$REPORT_SUBJECT" "$REPORT_FROM" "$REPORT_TO" "$REPORT_BODY"
+# Use sendmail to ensure correct From and UTF-8 encoding
+{
+  echo "From: WP Backup System <${REPORT_FROM}>"
+  echo "To: ${REPORT_TO}"
+  echo "Subject: ${REPORT_SUBJECT}"
+  echo "Content-Type: text/plain; charset=UTF-8"
+  echo
+  echo -e "$REPORT_BODY"
+} | sendmail -t
 
 rm -rf "$Temp_Backup"
 EOS
 
   chmod +x "$BACKUP_SCRIPT_PATH"
+
   CRON_JOB="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_PATH"
   CRONTAB_TMP=$(mktemp)
   crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_PATH" > "$CRONTAB_TMP" || true
@@ -723,15 +662,58 @@ EOS
   info "Daily backup scheduled at $BACKUP_TIME"
   info "Backup configuration written to $BACKUP_CONF_PATH"
 
-  send_email "WP Backup System install completed." "backup@${MAIL_DOMAIN}" "$REPORT_TO" "WP Backup install test email"
-  info "Test email sent to $REPORT_TO"
+  info "Configuring Postfix for SMTP relay..."
+  export DEBIAN_FRONTEND=noninteractive
+  debconf-set-selections <<< "postfix postfix/mailname string $MAIL_DOMAIN"
+  debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
+  apt-get install -y postfix mailutils
+
+  postconf -e "relayhost = [$SMTP_SERVER]:$SMTP_PORT"
+  postconf -e "smtp_sasl_auth_enable = yes"
+  postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
+  postconf -e "smtp_sasl_security_options = noanonymous"
+  postconf -e "smtp_tls_security_level = may"
+  postconf -e "smtp_use_tls = yes"
+  postconf -e "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
+  postconf -e "myhostname = $(hostname -f)"
+  postconf -e "myorigin = /etc/mailname"
+  postconf -e "smtputf8_enable = no"
+
+  echo "[$SMTP_SERVER]:$SMTP_PORT $SMTP_USER:$SMTP_PASS" > /etc/postfix/sasl_passwd
+  postmap /etc/postfix/sasl_passwd
+  chmod 600 /etc/postfix/sasl_passwd
+
+  systemctl restart postfix
+
+  info "Postfix SMTP relay configured."
+
+  # --- Install report email ---
+  SITE_REPORT="/tmp/wp_install_report_$(date +%Y%m%d_%H%M%S).txt"
+  {
+    echo "WP Install Report"
+    echo
+    echo "Sites configured:"
+    while IFS='|' read -r domain db user path vhost ssl; do
+      echo "- $domain (DB: $db, User: $user, Path: $path, VHost: $vhost, SSL: $ssl)"
+    done < "$SITES_LIST"
+  } > "$SITE_REPORT"
+
+  {
+    echo "From: WP Install <${REPORT_FROM}>"
+    echo "To: ${REPORT_TO}"
+    echo "Subject: WP Install Report"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo
+    cat "$SITE_REPORT"
+  } | sendmail -t
+
+  rm -f "$SITE_REPORT"
+  info "Install report sent to $REPORT_TO"
 fi
 
-if [[ "$FIRST_RUN" != true ]]; then
-  ask "Would you like to initiate a backup of all sites now? (y/n)" "n" INITIATE_BACKUP
-  if [[ "${INITIATE_BACKUP,,}" == "y" ]]; then
-    info "Running backup..."
-    "$BACKUP_SCRIPT_PATH"
-    info "Backup completed. Please check your backup destination and notification email."
-  fi
+# --- Offer to run backup after install ---
+read -p "Would you like to run a full backup now? (y/n): " RUN_NOW
+if [[ "${RUN_NOW,,}" == "y" ]]; then
+  info "Running backup..."
+  sudo /usr/local/bin/backup.sh
 fi
