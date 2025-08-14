@@ -1,3 +1,14 @@
+: '
+ __        ______    ____                           _  ___ _   
+ \ \      / /  _ \  |  _ \ ___  ___  ___ _   _  ___| |/ (_) |_ 
+  \ \ /\ / /| |_) | | |_) / _ \/ __|/ __| | | |/ _ \ ' /| | __|
+   \ V  V / |  __/  |  _ <  __/\__ \ (__| |_| |  __/ . \| | |_ 
+    \_/\_/  |_|     |_| \_\___||___/\___|\__,_|\___|_|\_\_|\__|
+                                                               
+
+          Automated WordPress Installer & Backup          
+
+'
 #!/usr/bin/env bash
 # SelfhostedWP Full Restore + Backup Setup Script
 # - Restores all/selected sites from Azure Blob backup
