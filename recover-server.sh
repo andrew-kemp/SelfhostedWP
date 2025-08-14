@@ -1,174 +1,314 @@
 #!/usr/bin/env bash
-# SelfhostedWP Restore Script: Recovers all or selected WordPress sites from Azure Blob backup
-# Installs all prerequisites and ensures certbot auto-renew for Let's Encrypt sites
+# SelfhostedWP Full Restore + Backup Setup Script
+# - Restores all/selected sites from Azure Blob backup
+# - Resets DB/user/password and updates wp-config.php
+# - Restores vhost configs and certs (real files, not symlinks)
+# - Installs backup.sh and config, schedules cron
+# - Copies sites.list to /etc/selfhostedwp/sites.list
+# - Emails restore report and offers immediate backup
 
 set -Eeuo pipefail
 
-# ===== Helpers =====
 require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    echo "Run as root." >&2; exit 1
-  fi
+  if [[ $EUID -ne 0 ]]; then echo "Run as root." >&2; exit 1; fi
 }
-
-command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 info() { echo -e "\033[1;32m==>\033[0m $*"; }
 warn() { echo -e "\033[1;33m!!\033[0m $*"; }
+gen_pw() { tr -dc A-Za-z0-9 </dev/urandom | head -c 20 ; echo ''; }
+send_report() {
+  local subject="$1"
+  local report_file="$2"
+  local from_email="$3"
+  local to_email="$4"
+  mail -s "$subject" -a "From: Restore <$from_email>" "$to_email" < "$report_file"
+}
 
-# ===== Main =====
 require_root
 
-# --- Prompt for SAS URL and backup day ---
-read -p "Azure Blob SAS URL for backup container: " SAS_URL
-read -p "Backup day to restore (e.g. Monday): " DAY
-read -p "Restore all sites (a) or single site (s)? [a/s]: " MODE
+# --- Azure blob info ---
+read -p "Azure Storage Account Name: " AZURE_ACCOUNT_NAME
+read -p "Azure Blob Container Name: " AZURE_CONTAINER_NAME
+read -p "Azure Blob SAS Token (after ?): " AZURE_SAS_TOKEN
+echo "Backup day/folder to restore (e.g. Thursday). This is CASE SENSITIVE."
+read -p "Enter backup day/folder: " DAY
 
-TMP_RESTORE="/tmp/wp_restore_$DAY"
-mkdir -p "$TMP_RESTORE"
+LOCAL_DEST="/tmp/siterecovery"
+mkdir -p "$LOCAL_DEST"
 
-# --- Prerequisite installs (match install script) ---
-info "Updating package index and installing prerequisites..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y apache2 php libsasl2-modules libapache2-mod-php php-gd mariadb-server mariadb-client php-mysql mailutils php-gmp php-mbstring php-xml php-curl wget rsync unzip tar openssl curl certbot python3-certbot-apache postfix
-
-# --- Install Azure CLI if missing ---
-if ! command_exists az; then
-  info "Installing Azure CLI..."
-  curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+REQUIRED_COMMANDS=("az" "wget" "unzip" "tar" "rsync" "mysql")
+all_tools_installed() {
+  for cmd in "${REQUIRED_COMMANDS[@]}"; do
+    if ! command -v "$cmd" &>/dev/null; then return 1; fi
+  done
+  return 0
+}
+if all_tools_installed; then
+  info "All required modules are already installed. Skipping install step."
+else
+  info "Some required modules are missing. Installing prerequisites..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y azure-cli wget unzip tar rsync mariadb-client mailutils
 fi
 
-# --- Download backup files from Azure ---
-info "Downloading backup files for $DAY from Azure Blob Storage..."
-AZURE_ACCOUNT_NAME="$(echo "$SAS_URL" | awk -F[/:] '{print $4}' | awk -F. '{print $1}')"
-AZURE_CONTAINER_NAME="$(echo "$SAS_URL" | awk -F[/:] '{print $5}' | awk -F'?' '{print $1}')"
-AZURE_SAS_TOKEN="$(echo "$SAS_URL" | awk -F'?' '{print $2}')"
+info "Listing blobs in '$DAY' folder of container '$AZURE_CONTAINER_NAME'..."
+az storage blob list \
+  --account-name "$AZURE_ACCOUNT_NAME" \
+  --container-name "$AZURE_CONTAINER_NAME" \
+  --prefix "$DAY/" \
+  --sas-token "$AZURE_SAS_TOKEN" \
+  --output table
 
+info "Downloading blobs from '$DAY/' directly to '$LOCAL_DEST'..."
 az storage blob download-batch \
   --account-name "$AZURE_ACCOUNT_NAME" \
-  --destination "$TMP_RESTORE" \
-  --source "$AZURE_CONTAINER_NAME/$DAY" \
-  --sas-token "$AZURE_SAS_TOKEN"
+  --destination "$LOCAL_DEST" \
+  --source "$AZURE_CONTAINER_NAME" \
+  --pattern "$DAY/*" \
+  --sas-token "$AZURE_SAS_TOKEN" \
+  --no-progress
 
-cd "$TMP_RESTORE"
+if [[ -d "$LOCAL_DEST/$DAY" ]]; then
+  mv "$LOCAL_DEST/$DAY"/* "$LOCAL_DEST/"
+  rmdir "$LOCAL_DEST/$DAY"
+  info "Moved downloaded files to '$LOCAL_DEST/' and removed '$LOCAL_DEST/$DAY' subfolder."
+fi
 
-# --- Retrieve sites.list ---
-if [[ ! -f sites.list ]]; then
-  warn "sites.list not found in backup. Abort."
+SITES_FILE="$LOCAL_DEST/sites.list"
+if [[ ! -f "$SITES_FILE" ]]; then
+  warn "sites.list not found in $LOCAL_DEST! Manual restore only possible."
   exit 1
 fi
 
-info "Available sites in backup:"
-awk -F'|' '{print $1}' sites.list
+BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
+BACKUP_CONF_PATH="/etc/selfhostedwp_backup.conf"
 
-if [[ "$MODE" == "s" ]]; then
-  read -p "Enter site hostname to restore: " SITE
-  if ! grep -q "^$SITE|" sites.list; then
-    warn "Site $SITE not found in backup."
-    exit 1
-  fi
-  RESTORE_SITES=("$SITE")
+# --- Restore backup.sh from local backup set (not from URL) ---
+if [[ -f $LOCAL_DEST/server_backup.sh ]]; then
+  cp "$LOCAL_DEST/server_backup.sh" "$BACKUP_SCRIPT_PATH"
+  chmod +x "$BACKUP_SCRIPT_PATH"
+  info "Copied backup.sh from backup set to $BACKUP_SCRIPT_PATH."
 else
-  RESTORE_SITES=( $(awk -F'|' '{print $1}' sites.list) )
+  warn "server_backup.sh not found in $LOCAL_DEST!"
 fi
 
-# --- Restore each site ---
-for SITE in "${RESTORE_SITES[@]}"; do
-  info "Restoring $SITE..."
+# --- Restore backup config ---
+if [[ -f $LOCAL_DEST/server_selfhostedwp_backup.conf ]]; then
+  cp "$LOCAL_DEST/server_selfhostedwp_backup.conf" "$BACKUP_CONF_PATH"
+  chmod 600 "$BACKUP_CONF_PATH"
+  info "Copied backup config from backup set to $BACKUP_CONF_PATH."
+else
+  warn "server_selfhostedwp_backup.conf not found in $LOCAL_DEST!"
+fi
 
-  DBNAME=$(awk -F'|' -v s="$SITE" '$1==s{print $2}' sites.list)
-  DBUSER=$(awk -F'|' -v s="$SITE" '$1==s{print $3}' sites.list)
-  WEBROOT=$(awk -F'|' -v s="$SITE" '$1==s{print $4}' sites.list)
-  VHOST_FILE="/etc/apache2/sites-available/${SITE}.conf"
-  SSL_OPTION=$(awk -F'|' -v s="$SITE" '$1==s{print $6}' sites.list)
+# --- Copy sites.list to /etc/selfhostedwp/sites.list ---
+if [[ -f "$LOCAL_DEST/sites.list" ]]; then
+  sudo mkdir -p /etc/selfhostedwp
+  cp "$LOCAL_DEST/sites.list" /etc/selfhostedwp/sites.list
+  chmod 600 /etc/selfhostedwp/sites.list
+  info "Copied sites.list to /etc/selfhostedwp/sites.list."
+else
+  warn "sites.list not found in $LOCAL_DEST!"
+fi
 
-  # Restore site files
-  if [[ -f "${SITE}.tar.gz" ]]; then
-    mkdir -p "$WEBROOT"
-    tar -xzf "${SITE}.tar.gz" -C "$WEBROOT"
-    chown -R www-data:www-data "$WEBROOT"
-  fi
+# --- Read email addresses and backup time from config file ---
+if [[ -f "$BACKUP_CONF_PATH" ]]; then
+  source "$BACKUP_CONF_PATH"
+  REPORT_FROM="${REPORT_FROM:-}"
+  REPORT_TO="${REPORT_TO:-}"
+  BACKUP_TIME="${BACKUP_TIME:-}"
+  BACKUP_TARGET="${BACKUP_TARGET:-}"
+else
+  warn "$BACKUP_CONF_PATH not found!"
+  REPORT_FROM=""
+  REPORT_TO=""
+  BACKUP_TIME=""
+  BACKUP_TARGET=""
+fi
 
-  # Restore database
-  if [[ -f "db_${DBNAME}.sql" ]]; then
-    mysql -e "DROP DATABASE IF EXISTS \`${DBNAME}\`;"
-    mysql -e "CREATE DATABASE \`${DBNAME}\`;"
-    mysql "$DBNAME" < "db_${DBNAME}.sql"
-    # Optionally, you can recreate user and set privileges here
-  fi
+# --- If BACKUP_TIME is missing, prompt for it and update config ---
+if [[ -z "$BACKUP_TIME" ]]; then
+  read -p "Daily backup time (24h format, e.g. 02:00): " BACKUP_TIME
+  sed -i "/^BACKUP_TIME=/d" "$BACKUP_CONF_PATH"
+  echo "BACKUP_TIME=\"$BACKUP_TIME\"" >> "$BACKUP_CONF_PATH"
+fi
+CRON_HOUR=$(echo "$BACKUP_TIME" | cut -d: -f1)
+CRON_MIN=$(echo "$BACKUP_TIME" | cut -d: -f2)
 
-  # Restore vhost config
-  if [[ -f "${SITE}.conf" ]]; then
-    cp "${SITE}.conf" "$VHOST_FILE"
-    a2ensite "${SITE}.conf" >/dev/null
-  fi
+# --- Set up cron for backup.sh ---
+CRON_JOB="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_PATH"
+CRONTAB_TMP=$(mktemp)
+crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_PATH" > "$CRONTAB_TMP" || true
+echo "$CRON_JOB" >> "$CRONTAB_TMP"
+crontab "$CRONTAB_TMP"
+rm -f "$CRONTAB_TMP"
+info "Scheduled backup.sh at $BACKUP_TIME daily."
 
-  # Restore SSL certs
-  if [[ "$SSL_OPTION" == "1" && -f "${SITE}_le_certs.tar.gz" ]]; then
-    mkdir -p "/etc/letsencrypt/live/$SITE"
-    tar -xzf "${SITE}_le_certs.tar.gz" -C "/etc/letsencrypt/live/$SITE"
-  fi
-  if [[ -f "${SITE}.crt" ]]; then
-    mkdir -p /var/cert
-    cp "${SITE}.crt" "/var/cert/${SITE}.crt"
-  fi
-  if [[ -f "${SITE}.key" ]]; then
-    mkdir -p /var/cert
-    cp "${SITE}.key" "/var/cert/${SITE}.key"
-  fi
-  if [[ -f "${SITE}_selfsigned.crt" ]]; then
-    mkdir -p "/var/cert/selfsigned"
-    cp "${SITE}_selfsigned.crt" "/var/cert/selfsigned/${SITE}.crt"
-  fi
-  if [[ -f "${SITE}_selfsigned.key" ]]; then
-    mkdir -p "/var/cert/selfsigned"
-    cp "${SITE}_selfsigned.key" "/var/cert/selfsigned/${SITE}.key"
-  fi
-
-  # Permissions
-  chown -R www-data:www-data "$WEBROOT"
+# --- Interactive site selection ---
+mapfile -t SITES < "$SITES_FILE"
+echo "Sites available for recovery:"
+for i in "${!SITES[@]}"; do
+  SITE_DOMAIN="${SITES[$i]%%|*}"
+  echo "$((i+1)). $SITE_DOMAIN"
 done
 
-# --- Restore sites.list ---
-cp sites.list /etc/selfhostedwp/sites.list
-chmod 600 /etc/selfhostedwp/sites.list
+echo ""
+echo "Options:"
+echo "  a. Recover ALL sites"
+echo "  s. Select sites to recover (comma separated numbers)"
+echo "  q. Quit"
+read -p "Choose (a/s/q): " CHOICE
 
-# --- Restore global configs ---
-[[ -f server_main.cf ]] && cp server_main.cf /etc/postfix/main.cf
-[[ -f server_sasl_passwd ]] && cp server_sasl_passwd /etc/postfix/sasl_passwd && postmap /etc/postfix/sasl_passwd && chmod 600 /etc/postfix/sasl_passwd
-[[ -f server_selfhostedwp_backup.conf ]] && cp server_selfhostedwp_backup.conf /etc/selfhostedwp_backup.conf
-[[ -f server_apache2.conf ]] && cp server_apache2.conf /etc/apache2/apache2.conf
-
-if [[ -f server_cert.tar.gz ]]; then
-  tar -xzf server_cert.tar.gz -C /
+SELECTED_SITES=()
+if [[ $CHOICE == "a" ]]; then
+  SELECTED_SITES=("${SITES[@]}")
+elif [[ $CHOICE == "s" ]]; then
+  read -p "Enter comma-separated site numbers (e.g. 1,3): " NUMS
+  IFS=',' read -ra IDS <<< "$NUMS"
+  for n in "${IDS[@]}"; do
+    idx=$((n-1))
+    if [[ $idx -ge 0 && $idx -lt ${#SITES[@]} ]]; then
+      SELECTED_SITES+=("${SITES[$idx]}")
+    fi
+  done
+else
+  echo "Quit."
+  exit 0
 fi
-if [[ -f server_letsencrypt.tar.gz ]]; then
-  tar -xzf server_letsencrypt.tar.gz -C /
-fi
 
-# --- Certbot auto-renew for Let's Encrypt sites ---
-if grep -q '|1$' sites.list; then
-  info "Enabling certbot timer for auto-renewal..."
-  systemctl enable certbot.timer
-  systemctl start certbot.timer
-  # Restore hook if present
-  HOOK_PATH="/etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh"
-  if [[ ! -f "$HOOK_PATH" ]]; then
-    mkdir -p "$(dirname "$HOOK_PATH")"
-    cat > "$HOOK_PATH" <<'HOOK'
-#!/usr/bin/env bash
-systemctl reload apache2
-HOOK
-    chmod +x "$HOOK_PATH"
+RESTORE_REPORT="/tmp/restore_report_$(date +%Y%m%d_%H%M%S).txt"
+echo "Restore Report - $(date)" > "$RESTORE_REPORT"
+echo "" >> "$RESTORE_REPORT"
+
+# --- Restore each selected site ---
+for SITE_LINE in "${SELECTED_SITES[@]}"; do
+  IFS='|' read -r SITE_DOMAIN DB_NAME DB_USER SITE_PATH VHOST_FILE SSL_OPTION <<< "$SITE_LINE"
+  info "Restoring site: $SITE_DOMAIN"
+
+  # Restore WordPress files
+  WP_ARCHIVE="$LOCAL_DEST/${SITE_DOMAIN}.tar.gz"
+  if [[ -f "$WP_ARCHIVE" ]]; then
+    info "Extracting WordPress files to $SITE_PATH ..."
+    mkdir -p "$SITE_PATH"
+    tar -xzf "$WP_ARCHIVE" -C "$SITE_PATH"
+    chown -R www-data:www-data "$SITE_PATH"
+  else
+    warn "Site archive $WP_ARCHIVE not found for $SITE_DOMAIN."
   fi
+
+  # Database setup: create DB, user, password, and grant privileges
+  DB_BACKUP_FILE="$LOCAL_DEST/${DB_NAME}.sql"
+  DB_PASS="$(gen_pw)"
+  info "Creating database '$DB_NAME' and user '$DB_USER' with generated password..."
+  sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
+  sudo mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+  sudo mysql -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+  sudo mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
+  sudo mysql -e "FLUSH PRIVILEGES;"
+
+  # Restore DB
+  if [[ -f "$DB_BACKUP_FILE" ]]; then
+    info "Restoring database from $DB_BACKUP_FILE to $DB_NAME..."
+    sudo mysql "${DB_NAME}" < "$DB_BACKUP_FILE"
+    info "Database restored for $SITE_DOMAIN."
+  else
+    warn "Database backup $DB_BACKUP_FILE not found for $SITE_DOMAIN."
+  fi
+
+  # Update wp-config.php with new DB user and password
+  WPCONFIG="${SITE_PATH}/wp-config.php"
+  if [[ -f "$WPCONFIG" ]]; then
+    sed -i "s/define(\s*'DB_USER',\s*'[^']*'/define('DB_USER', '${DB_USER}'/" "$WPCONFIG"
+    sed -i "s/define(\s*'DB_PASSWORD',\s*'[^']*'/define('DB_PASSWORD', '${DB_PASS}'/" "$WPCONFIG"
+    sed -i "s/define(\s*'DB_NAME',\s*'[^']*'/define('DB_NAME', '${DB_NAME}'/" "$WPCONFIG"
+    info "Updated wp-config.php for $SITE_DOMAIN with new DB user and password."
+  else
+    warn "wp-config.php not found for $SITE_DOMAIN. Please update DB password manually."
+  fi
+
+  echo "Site: https://${SITE_DOMAIN}" >> "$RESTORE_REPORT"
+  echo "Database name: ${DB_NAME}" >> "$RESTORE_REPORT"
+  echo "Database user: ${DB_USER}" >> "$RESTORE_REPORT"
+  echo "Database password: ${DB_PASS}" >> "$RESTORE_REPORT"
+  echo "Webroot: ${SITE_PATH}" >> "$RESTORE_REPORT"
+  echo "Apache vhost: ${VHOST_FILE}" >> "$RESTORE_REPORT"
+  echo "" >> "$RESTORE_REPORT"
+
+  # Restore vhost config
+  VHOST_BACKUP="$LOCAL_DEST/${SITE_DOMAIN}.conf"
+  if [[ -f "$VHOST_BACKUP" ]]; then
+    info "Restoring Apache vhost config to $VHOST_FILE"
+    mkdir -p "$(dirname "$VHOST_FILE")"
+    cp "$VHOST_BACKUP" "$VHOST_FILE"
+  else
+    warn "Vhost config $VHOST_BACKUP not found for $SITE_DOMAIN."
+  fi
+
+  # Restore SSL certs if present (removes symlinks, restores real files)
+  if [[ "$SSL_OPTION" == "1" && -f "$LOCAL_DEST/${SITE_DOMAIN}_le_certs.tar.gz" ]]; then
+    info "Restoring Let's Encrypt certs for $SITE_DOMAIN"
+    sudo mkdir -p "/etc/letsencrypt/live/$SITE_DOMAIN"
+    for f in cert.pem chain.pem fullchain.pem privkey.pem; do
+      if [[ -L "/etc/letsencrypt/live/$SITE_DOMAIN/$f" ]]; then
+        sudo rm "/etc/letsencrypt/live/$SITE_DOMAIN/$f"
+      fi
+    done
+    sudo tar -xzf "$LOCAL_DEST/${SITE_DOMAIN}_le_certs.tar.gz" -C "/etc/letsencrypt/live/$SITE_DOMAIN"
+    sudo chown -R root:root "/etc/letsencrypt/live/$SITE_DOMAIN"
+    if [[ ! -s "/etc/letsencrypt/live/$SITE_DOMAIN/fullchain.pem" || ! -s "/etc/letsencrypt/live/$SITE_DOMAIN/privkey.pem" ]]; then
+      warn "Warning: Let's Encrypt certs not properly restored for $SITE_DOMAIN!"
+    fi
+  fi
+  if [[ "$SSL_OPTION" == "2" || "$SSL_OPTION" == "3" ]]; then
+    if [[ -f "$LOCAL_DEST/${SITE_DOMAIN}.crt" ]]; then
+      sudo mkdir -p "/var/cert"
+      sudo cp "$LOCAL_DEST/${SITE_DOMAIN}.crt" "/var/cert/${SITE_DOMAIN}.crt"
+    fi
+    if [[ -f "$LOCAL_DEST/${SITE_DOMAIN}.key" ]]; then
+      sudo mkdir -p "/var/cert"
+      sudo cp "$LOCAL_DEST/${SITE_DOMAIN}.key" "/var/cert/${SITE_DOMAIN}.key"
+    fi
+    if [[ -f "$LOCAL_DEST/${SITE_DOMAIN}_selfsigned.crt" ]]; then
+      sudo mkdir -p "/var/cert/selfsigned"
+      sudo cp "$LOCAL_DEST/${SITE_DOMAIN}_selfsigned.crt" "/var/cert/selfsigned/${SITE_DOMAIN}.crt"
+    fi
+    if [[ -f "$LOCAL_DEST/${SITE_DOMAIN}_selfsigned.key" ]]; then
+      sudo mkdir -p "/var/cert/selfsigned"
+      sudo cp "$LOCAL_DEST/${SITE_DOMAIN}_selfsigned.key" "/var/cert/selfsigned/${SITE_DOMAIN}.key"
+    fi
+  fi
+done
+
+# --- Enable required Apache modules ---
+info "Enabling required Apache modules..."
+a2enmod headers || true
+a2enmod ssl || true
+a2enmod rewrite || true
+
+info "Restarting Apache..."
+systemctl restart apache2
+
+info "Selected site(s) files, databases, configs, and certs restored."
+
+# --- Send restore report ---
+if [[ -n "$REPORT_FROM" && -n "$REPORT_TO" ]]; then
+  info "Emailing restore report to $REPORT_TO ..."
+  send_report "Restore completed on $(hostname -f)" "$RESTORE_REPORT" "$REPORT_FROM" "$REPORT_TO"
+else
+  warn "Restore report not emailed: sender or recipient not set in backup config."
+fi
+rm -f "$RESTORE_REPORT"
+
+echo "Review restored config files and verify SSL certs if needed."
+echo "If Apache fails to start, check vhost and cert paths, and run: systemctl status apache2.service"
+
+# --- Prompt to run backup now ---
+read -p "Would you like to run a backup now to verify everything is working? (y/n): " RUN_TEST_BACKUP
+if [[ "${RUN_TEST_BACKUP,,}" == "y" ]]; then
+  info "Running test backup..."
+  "$BACKUP_SCRIPT_PATH"
+  info "Test backup completed. Please check your backup destination and notification email."
 fi
 
-# --- Restart services ---
-info "Reloading Apache and Postfix..."
-systemctl reload apache2
-systemctl reload postfix
-
-info "Restore complete."
-echo "Sites restored: ${RESTORE_SITES[*]}"
-echo "Please verify each site and adjust DNS if required."
+info "Recovery and setup complete."
