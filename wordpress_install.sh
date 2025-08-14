@@ -504,11 +504,11 @@ done < "$SITES_LIST"
 cp "$SITES_LIST" "$Temp_Backup/sites.list"
 
 # --- GLOBAL CONFIG FILES ---
-cp /etc/postfix/main.cf "$Temp_Backup/server_main.cf"
-cp /etc/postfix/sasl_passwd "$Temp_Backup/server_sasl_passwd"
-cp /usr/local/bin/backup.sh "$Temp_Backup/server_backup.sh"
-cp /etc/selfhostedwp_backup.conf "$Temp_Backup/server_selfhostedwp_backup.conf"
-cp /etc/apache2/apache2.conf "$Temp_Backup/server_apache2.conf"
+cp /etc/postfix/main.cf "$Temp_Backup/main.cf"
+cp /etc/postfix/sasl_passwd "$Temp_Backup/sasl_passwd"
+cp /usr/local/bin/backup.sh "$Temp_Backup/backup.sh"
+cp /etc/selfhostedwp_backup.conf "$Temp_Backup/selfhostedwp_backup.conf"
+cp /etc/apache2/apache2.conf "$Temp_Backup/apache2.conf"
 if [[ -d /var/cert/ ]]; then
   tar -czf "$Temp_Backup/server_cert.tar.gz" -C /var cert
 fi
