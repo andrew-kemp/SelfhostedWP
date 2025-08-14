@@ -455,16 +455,31 @@ while IFS='|' read -r SITE_HOST DB_NAME DB_USER WEBROOT VHOST_FILE SSL_OPTION; d
   tar -czf "$Temp_Backup/${SITE_HOST}.tar.gz" -C "$WEBROOT" .
 
   # DB dump
-  mysqldump "$DB_NAME" > "$Temp_Backup/${DB_NAME}.sql"
+  mysqldump "$DB_NAME" > "$Temp_Backup/db_${DB_NAME}.sql"
 
   # vhost conf
   cp "$VHOST_FILE" "$Temp_Backup/${SITE_HOST}.conf"
 
   # --- SITE CERTS ---
   # Let's Encrypt
-  if [[ "$SSL_OPTION" == "1" && -d "/etc/letsencrypt/live/$SITE_HOST" ]]; then
-    tar -czf "$Temp_Backup/${SITE_HOST}_le_certs.tar.gz" -C "/etc/letsencrypt/live/$SITE_HOST" .
+  if [[ "$SSL_OPTION" == "1" && -d "/etc/letsencrypt/archive/$SITE_HOST" ]]; then
+    TMP_LE_CERTS="$Temp_Backup/le_certs_${SITE_HOST}"
+    mkdir -p "$TMP_LE_CERTS"
+    # Copy most recent versions to generic filenames
+    for t in cert chain fullchain privkey; do
+      SRC=$(ls -1 /etc/letsencrypt/archive/$SITE_HOST/${t}*.pem 2>/dev/null | sort | tail -n1)
+      if [[ -n "$SRC" && -f "$SRC" ]]; then
+        cp "$SRC" "$TMP_LE_CERTS/${t}.pem"
+      fi
+    done
+    # Copy README if present
+    if [[ -f "/etc/letsencrypt/archive/$SITE_HOST/README" ]]; then
+      cp "/etc/letsencrypt/archive/$SITE_HOST/README" "$TMP_LE_CERTS/README"
+    fi
+    tar -czf "$Temp_Backup/${SITE_HOST}_le_certs.tar.gz" -C "$TMP_LE_CERTS" .
+    rm -rf "$TMP_LE_CERTS"
   fi
+
   # Custom/self-signed
   if [[ "$SSL_OPTION" == "2" || "$SSL_OPTION" == "3" ]]; then
     # Find typical cert/key paths
@@ -491,6 +506,7 @@ cp "$SITES_LIST" "$Temp_Backup/sites.list"
 # --- GLOBAL CONFIG FILES ---
 cp /etc/postfix/main.cf "$Temp_Backup/server_main.cf"
 cp /etc/postfix/sasl_passwd "$Temp_Backup/server_sasl_passwd"
+cp /usr/local/bin/backup.sh "$Temp_Backup/server_backup.sh"
 cp /etc/selfhostedwp_backup.conf "$Temp_Backup/server_selfhostedwp_backup.conf"
 cp /etc/apache2/apache2.conf "$Temp_Backup/server_apache2.conf"
 if [[ -d /var/cert/ ]]; then
