@@ -499,6 +499,7 @@ copy_global /etc/postfix/sasl_passwd "$Temp_Backup/sasl_passwd"
 copy_global /usr/local/bin/backup.sh "$Temp_Backup/backup.sh"
 copy_global /etc/selfhostedwp_backup.conf "$Temp_Backup/selfhostedwp_backup.conf"
 copy_global /etc/apache2/apache2.conf "$Temp_Backup/apache2.conf"
+copy_global /etc/selfhostedwp/sites.list "$Temp_Backup/sites.list"
 
 if [[ -d /var/cert/ ]]; then
   if tar -czf "$Temp_Backup/server_cert.tar.gz" -C /var cert 2>/dev/null; then
