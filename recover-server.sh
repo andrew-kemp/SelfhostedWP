@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 : '
  __        ______    ____                           _  ___ _   
  \ \      / /  _ \  |  _ \ ___  ___  ___ _   _  ___| |/ (_) |_ 
@@ -9,7 +10,6 @@
           Automated WordPress Installer & Backup          
 
 '
-#!/usr/bin/env bash
 # SelfhostedWP Full Restore + Backup Setup Script
 # - Restores all/selected sites from Azure Blob backup
 # - Resets DB/user/password and updates wp-config.php
