@@ -1,4 +1,5 @@
-: '
+Clear
+cat <<'EOF'
  __        ______    ____                           _  ___ _   
  \ \      / /  _ \  |  _ \ ___  ___  ___ _   _  ___| |/ (_) |_ 
   \ \ /\ / /| |_) | | |_) / _ \/ __|/ __| | | |/ _ \ ' /| | __|
@@ -8,7 +9,7 @@
 
           Automated WordPress Installer & Backup          
 
-'
+EOF
 #!/usr/bin/env bash
 # SelfhostedWP Automated Installer & Backup for Ubuntu
 # Interactive multi-site installer with improved backup reporting
