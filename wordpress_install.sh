@@ -455,7 +455,7 @@ while IFS='|' read -r SITE_HOST DB_NAME DB_USER WEBROOT VHOST_FILE SSL_OPTION; d
   tar -czf "$Temp_Backup/${SITE_HOST}.tar.gz" -C "$WEBROOT" .
 
   # DB dump
-  mysqldump "$DB_NAME" > "$Temp_Backup/db_${DB_NAME}.sql"
+  mysqldump "$DB_NAME" > "$Temp_Backup/${DB_NAME}.sql"
 
   # vhost conf
   cp "$VHOST_FILE" "$Temp_Backup/${SITE_HOST}.conf"
