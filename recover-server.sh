@@ -3,7 +3,7 @@
 # - Restores all/selected sites from Azure Blob backup
 # - Resets DB/user/password and updates wp-config.php
 # - Restores vhost configs and certs (real files, not symlinks)
-# - Installs backup.sh and config, schedules cron
+# - Restores global config files (Postfix, Apache, backup.sh, etc.)
 # - Copies sites.list to /etc/selfhostedwp/sites.list
 # - Emails restore report and offers immediate backup
 
@@ -84,22 +84,50 @@ fi
 BACKUP_SCRIPT_PATH="/usr/local/bin/backup.sh"
 BACKUP_CONF_PATH="/etc/selfhostedwp_backup.conf"
 
-# --- Restore backup.sh from local backup set (not from URL) ---
-if [[ -f $LOCAL_DEST/server_backup.sh ]]; then
-  cp "$LOCAL_DEST/server_backup.sh" "$BACKUP_SCRIPT_PATH"
-  chmod +x "$BACKUP_SCRIPT_PATH"
-  info "Copied backup.sh from backup set to $BACKUP_SCRIPT_PATH."
-else
-  warn "server_backup.sh not found in $LOCAL_DEST!"
+# --- Restore global config files ---
+if [[ -f "$LOCAL_DEST/main.cf" ]]; then
+  sudo cp "$LOCAL_DEST/main.cf" /etc/postfix/main.cf
+  info "Restored /etc/postfix/main.cf."
 fi
 
-# --- Restore backup config ---
-if [[ -f $LOCAL_DEST/server_selfhostedwp_backup.conf ]]; then
-  cp "$LOCAL_DEST/server_selfhostedwp_backup.conf" "$BACKUP_CONF_PATH"
-  chmod 600 "$BACKUP_CONF_PATH"
-  info "Copied backup config from backup set to $BACKUP_CONF_PATH."
+if [[ -f "$LOCAL_DEST/sasl_passwd" ]]; then
+  sudo cp "$LOCAL_DEST/sasl_passwd" /etc/postfix/sasl_passwd
+  sudo chmod 600 /etc/postfix/sasl_passwd
+  sudo postmap /etc/postfix/sasl_passwd
+  info "Restored /etc/postfix/sasl_passwd and ran postmap."
+fi
+
+sudo systemctl restart postfix
+info "Restarted Postfix after restoring configs."
+
+if [[ -f "$LOCAL_DEST/backup.sh" ]]; then
+  sudo cp "$LOCAL_DEST/backup.sh" "$BACKUP_SCRIPT_PATH"
+  sudo chmod +x "$BACKUP_SCRIPT_PATH"
+  info "Restored backup.sh."
 else
-  warn "server_selfhostedwp_backup.conf not found in $LOCAL_DEST!"
+  warn "backup.sh not found in $LOCAL_DEST!"
+fi
+
+if [[ -f "$LOCAL_DEST/selfhostedwp_backup.conf" ]]; then
+  sudo cp "$LOCAL_DEST/selfhostedwp_backup.conf" "$BACKUP_CONF_PATH"
+  sudo chmod 600 "$BACKUP_CONF_PATH"
+  info "Restored selfhostedwp_backup.conf."
+else
+  warn "selfhostedwp_backup.conf not found in $LOCAL_DEST!"
+fi
+
+if [[ -f "$LOCAL_DEST/apache2.conf" ]]; then
+  sudo cp "$LOCAL_DEST/apache2.conf" /etc/apache2/apache2.conf
+  info "Restored /etc/apache2/apache2.conf."
+fi
+
+if [[ -f "$LOCAL_DEST/server_cert.tar.gz" ]]; then
+  sudo tar -xzf "$LOCAL_DEST/server_cert.tar.gz" -C /var
+  info "Restored /var/cert from server_cert.tar.gz."
+fi
+if [[ -f "$LOCAL_DEST/server_letsencrypt.tar.gz" ]]; then
+  sudo tar -xzf "$LOCAL_DEST/server_letsencrypt.tar.gz" -C /etc
+  info "Restored /etc/letsencrypt from server_letsencrypt.tar.gz."
 fi
 
 # --- Copy sites.list to /etc/selfhostedwp/sites.list ---
